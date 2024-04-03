@@ -46,8 +46,8 @@ IMAGE_INSTALL += " \
     apt \
     nano \
     binutils \
-    adu-device-info-files \
     adu-agent-service \
+    adu-device-info-files \
     "
    
 export IMAGE_BASENAME = "adu-base-image"

@@ -33,7 +33,6 @@ IMAGE_FEATURES += " debug-tweaks tools-debug package-management"
 # python3-setuptools - provides python3 related components
 # apt  - provide apt, apt-*, and dpkg components
 # nano - a basic text editor for convenience
-# adu-device-info-update-files - device info files with the patched adu-version (patch#1)
 IMAGE_INSTALL += " \
     sudo \
     parted \
@@ -47,8 +46,8 @@ IMAGE_INSTALL += " \
     apt \
     nano \
     binutils \
-    adu-device-info-update-files \
     adu-agent-service \
+    adu-device-info-update-files \
     "
    
 export IMAGE_BASENAME = "adu-base-1-image"
