@@ -1,14 +1,14 @@
 software =
 {
     version = "@@ADU_SOFTWARE_VERSION@@";
-    raspberrypi4 = {
+    @@MACHINE@@ = {
         hardware-compatibility: ["1.0"];
         stable = {
             copy1 : {
                 images: (
                     {
-                        filename = "adu-base-image-raspberrypi4-64.ext4.gz";
-                        sha256 = "$swupdate_get_sha256(adu-base-image-raspberrypi4-64.ext4.gz)";
+                        filename = "adu-base-image-@@MACHINE@@.ext4.gz";
+                        sha256 = "$swupdate_get_sha256(adu-base-image-@@MACHINE@@.ext4.gz)";
                         type = "raw";
                         compressed = "zlib";
                         device = "/dev/mmcblk0p2";
@@ -18,8 +18,8 @@ software =
             copy2 : {
                 images: (
                     {
-                        filename = "adu-base-image-raspberrypi4-64.ext4.gz";
-                        sha256 = "$swupdate_get_sha256(adu-base-image-raspberrypi4-64.ext4.gz)";
+                        filename = "adu-base-image-@@MACHINE@@.ext4.gz";
+                        sha256 = "$swupdate_get_sha256(adu-base-image-@@MACHINE@@.ext4.gz)";
                         type = "raw";
                         compressed = "zlib";
                         device = "/dev/mmcblk0p3";
