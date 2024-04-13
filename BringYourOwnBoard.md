@@ -16,10 +16,10 @@ To use Device Update for IoT Hub there are some requirements that your image bui
 
 1. The prepared image MUST contain at least three partitions: the A partition, the B partition, and the ADU partition
 2. The prepared image MUST overload or modify the existing bootloader such that the system is able to load into either the A or B partition. The boot logic will be determined by your BSP. You must add the ability to set flags in order to use the correct partition after an update. You can see the one the proof-of-concept agent uses [here](./recipes-bsp/rpi-u-boot-scr/rpi-u-boot-scr.bbappend). Likely you will be able to append the image you're targeting's default bootloader but that will be on a case-by-case basis. 
-3. The image build system MUST bake a hardware compatability file into the image. The Device Update proof-of-concept creates this within the [recipes-support/adu-swupdate-hw-compat.bb](./recipes-support/adu-swupdate-hw-compat/adu-swupdate-hw-compat.bb) but you can choose to use whatever file or versioning method you would like. 
+3. The image build system MUST bake a hardware compatibility file into the image. The Device Update proof-of-concept creates this within the [recipes-support/adu-swupdate-hw-compat.bb](./recipes-support/adu-swupdate-hw-compat/adu-swupdate-hw-compat.bb) but you can choose to use whatever file or versioning method you would like. 
 4. If you are using the [meta-azure-device-update repository](https://github.com/Azure/meta-azure-device-update) meta layer to bake the image in you must set the `ADU_SOFTWARE_VERSION` to the version of Device Update you are using within your build system. 
 
-These are general guidance on larger scale items that need ot be taken care of for the agent to build properly on your device. The following section will first focus on what the Device Update `meta-raspberrypi-adu` layer is attempting to accomplish in each layer and what considerations you may want to make. If you read the above items and are unsure of how to proceed please reach out to the Device Update team or talk to your BSP provider. Likely an answer to your question will require information from both. 
+These are general guidances on larger scale items that need to be taken care of for the agent to build properly for your device. The following sections will focus on what the Device Update `meta-raspberrypi-adu` layer is attempting to accomplish in each layer and what considerations you may want to make. If you read the above items and are unsure of how to proceed please reach out to the Device Update team or talk to your BSP provider. Likely an answer to your question will require information from both. 
 
 # On Patches In this Repo
 
@@ -31,9 +31,12 @@ There are a lot of patches within this repository. This is a normal process of d
 
 ### What does it do? 
 
-Within our project `recipes-bsp` is used for appending instructions to the bootloader that allow SwUpdate to set which partition to boot into after completing an image update (eg if we've completed an update while running on `/dev/mmcblk0p0` then when the device restarts we boot into `/dev/mmcblk0p1` which contains the new version of the image). For our purposes we can use [rpi-u-boot-scr.bbappend](./recipes-bsp/rpi-u-boot-scr/rpi-u-boot-scr.bbappend) to add the [boot.cmd.in](./recipes-bsp/rpi-u-boot-scr/files/boot.cmd.in) file to the Raspberry Pi 4's boot process which instructs the device to do the A/B switching. 
+Within our project `recipes-bsp` is used for appending instructions to the bootloader that allow SwUpdate to set which partition to boot into after completing an image update (eg if we've completed an update while running on `/dev/mmcblk0p1` then when the device restarts we boot into `/dev/mmcblk0p2` which contains the new version of the image). For our purposes we can use [rpi-u-boot-scr.bbappend](./recipes-bsp/rpi-u-boot-scr/rpi-u-boot-scr.bbappend) to add the [boot.cmd.in](./recipes-bsp/rpi-u-boot-scr/files/boot.cmd.in) file to the Raspberry Pi 4's boot process which instructs the device to do the A/B switching. 
 
-Within this layer we also edit u-boot to use our own firmware environment configuration and append a special patch for a gcc issue that RaspberryPi has been dealing with. 
+Within this layer we edit u-boot to use our own firmware environment configuration which sets aside a part of memory for us to store the variable that we use to indicate to the bootloader which partition to boot into. 
+
+There is also a patch for a GCC issue some RaspberryPi's run into. The reader can safely disregard this and any other patch. They are BSP specific and should not be required for your build. 
+
 ### What do I need to think about? 
 
 You must talk to your BSP provider and determine what bootloader they provide as apart of the BSP. Likely you will need to create a more durable u-boot script that handles detecting if an update occurred, determines what partition to load into, and provide the logic to do that switching. 
@@ -53,7 +56,7 @@ For a production device the core idea of using a flag to say what to load into i
 
 First you should also write the hash of the image to be booted into. Then u-boot should hash the partition you're attempting to write into (at least include a CRC checksum) and determine if the partition is what you expect. This prevents direct flash injection attacks and keeps your device from running unsafe code. 
 
-Second you want to add a method for handling a kernel panic. That is if you've completed an update and somehow the partition you're booting into isn't bootable you have a way to fall back from the B side to the A side or vice versa. You can accomplish that using u-boot flags and some logic around what to do when. That is essential for preventing your nice, expensive devices from turning into bricks. 
+Second you want to add a method for handling a kernel panic. That is if you've completed an update and somehow the partition you're booting into isn't bootable you have a way to fall back from the B side to the A side or vice versa. You can accomplish that using u-boot flags and some logic around what to do when. This is essential to preventing security breaches and making sure your devices have healthy fallbacks. 
 
 Lastly you should look into how your partitions are setup. We only include three partitions + the bootloader in our proof of concept. We use two for updates and one for the Device Update data to be persisted between the two sectors. You may have additional data you need persisted across updates. This would be a place to include some of the boot logic to check whether these sectors are secure or have been messed with since the last boot. Effectively just do secure boot but not secure boot. 
 
@@ -65,9 +68,9 @@ The recipes-core meta layer is responsible for finalizing the physical image its
 
 There's only two things this section does to edit the base raspberrypi image to support Device Update. 
 
-First is to add a `fstab` file to the core image that mounts the required partitions by appending the base-files_ within the raspberrypi base image. We accomplish this by overriding the defaul [fstab file](https://git.yoctoproject.org/poky/tree/meta/recipes-core/base-files/base-files/fstab?h=kirkstone-4.0.17) provided by the Yocto Project and adding our [fstab file](./recipes-core/base-files/base-files/raspberrypi4-64/fstab). 
+First is to add a `fstab` file to the core image that mounts the required partitions by appending the base-files_ within the raspberrypi base image. We accomplish this by overriding the default [fstab file](https://git.yoctoproject.org/poky/tree/meta/recipes-core/base-files/base-files/fstab?h=kirkstone-4.0.17) provided by the Yocto Project and adding our [fstab file](./recipes-core/base-files/base-files/raspberrypi4-64/fstab). 
 
-Second the adu-base-image is defined by [adu-base-image.bb](./recipes-core/images/adu-base-image.bb) and the partitions on the image are created using our [`adu-raspberrypi.wks`](./wic/adu-raspberrypi.wks) script. You can read more about what's going on in that file below and checkout the [wic tool documentation here.](https://docs.yoctoproject.org/dev-manual/wic.html?highlight=wic#creating-partitioned-images-using-wic). Apart of building the image is specifying the items that must be installed in this particular image. We use this to define which elements from [meta-azure-device-update](https://github.com/Azure/meta-azure-device-update.git) we're going to be using in this image. This is like a dependency list. It tells Yocto build all of this first and then run the `do_install()` sections of the individual items before you giving me my image. 
+Second the adu-base-image is defined by [adu-base-image.bb](./recipes-core/images/adu-base-image.bb) and the partitions on the image are created using our [`adu-raspberrypi.wks`](./wic/adu-raspberrypi.wks) script. You can read more about what's going on in that file below and checkout the [wic tool documentation here.](https://docs.yoctoproject.org/dev-manual/wic.html?highlight=wic#creating-partitioned-images-using-wic). A part of building the image is specifying the items that must be installed in this particular image. We use this to define which elements from [meta-azure-device-update](https://github.com/Azure/meta-azure-device-update.git) we're going to be using in this image. This is like a dependency list. It tells Yocto build all of this first and then run the `do_install()` sections of the individual items before you giving me my image. 
 
 ### What do I need to think about? 
 
@@ -91,7 +94,7 @@ As apart of the `*.swu` generation swupdate will require that you sign the file 
 
 ### What do I need to think about? 
 
-For a customer looking at porting this section over there's not a lot you need to chagne. You need to edit the file such that it depends on your own custom image's bitbake file, edit the sw-description file to reflect what you would like the system to look like after an update, and provide tooling for accessing a private signing key. 
+For a customer looking at porting this section over there's not a lot you need to change. You need to edit the file such that it depends on your own custom image's bitbake file, edit the sw-description file to reflect what you would like the system to look like after an update, and provide tooling for accessing a private signing key. 
 
 ## recipes-graphics
 
@@ -103,7 +106,7 @@ There's nothing that affects customers in this section. You should just be able 
 ## recipes-support
 ### What does it do? 
 
-In our project the [recipes-support](./recipes-support/) directory appends some of the extra tooling around swupdate. We use the [adu-swupdate-hw-compat.bb](./recipes-support/adu-swupdate-hw-compat/adu-swupdate-hw-compat.bb) to install a hardware compatibility file onto the image which swupdate looks for when completing an update. The version held within this file MUST mach the one inside of the `sw-description` file mentioned above. 
+In our project the [recipes-support](./recipes-support/) directory appends some of the extra tooling around swupdate. We use the [adu-swupdate-hw-compat.bb](./recipes-support/adu-swupdate-hw-compat/adu-swupdate-hw-compat.bb) to install a hardware compatibility file onto the image which swupdate looks for when completing an update. The version held within this file MUST match the one inside of the `sw-description` file mentioned above. 
 
 We also append swupdate with our own configuration inside of the [defconfig file](./recipes-support/swupdate/swupdate/raspberrypi4-64/defconfig). 
 ### What do I need to think about? 
