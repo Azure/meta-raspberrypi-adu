@@ -9,7 +9,7 @@ LICENSE="CLOSED"
 include recipes-core/images/core-image-minimal.bb
 
 # .wks file is used to create partitions in image.
-WKS_FILE:raspberrypi3 = "adu-raspberrypi.wks"
+WKS_FILE:raspberrypi4 = "adu-raspberrypi.wks"
 # wic* images our used to flash SD cards
 # ext4.gz image is used to construct swupdate image.
 IMAGE_FSTYPES += "wic wic.gz ext4.gz"
@@ -46,8 +46,8 @@ IMAGE_INSTALL += " \
     apt \
     nano \
     binutils \
-    adu-device-info-files \
     adu-agent-service \
+    adu-device-info-files \
     "
    
 export IMAGE_BASENAME = "adu-base-image"

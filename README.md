@@ -26,7 +26,7 @@ This layer contains the following recipes:
 | Recipe Name      | Description |
 | ------------- | ---------- |
 | recipes-bsp | Customizes `uboot` script to support A/B update strategy. This is required for SWUpdate Handler (for demonstration or reference purposes). |
-| recipes-core | Customizes `ftab` to add the 2nd root file system partition (for A/B update strategy) and Device Update data partition (/adu).<br/>This recipe also defines what is included in the base image (adu-base-image).  |
+| recipes-core | Customizes `fstab` to add the 2nd root file system partition (for A/B update strategy) and Device Update data partition (/adu).<br/>This recipe also defines what is included in the base image (adu-base-image).  |
 | recipes-extended | This recipe defines what is included in the .swu file (adu-update-image).|
 | recipes-graphics | Includes graphics component for the target device. |
 | recipes-support | Creates a customized version of swupdate tool that enabled configurations required by SWUpdate Handler and the Delta Downloader. |
