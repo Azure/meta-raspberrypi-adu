@@ -49,5 +49,5 @@ IMAGE_INSTALL += " \
     adu-agent-service \
     adu-device-info-update-files \
     "
-   
+export IMAGE_NAME_SUFFIX = ""
 export IMAGE_BASENAME = "adu-base-1-image"

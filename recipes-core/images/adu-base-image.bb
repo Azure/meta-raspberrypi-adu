@@ -50,4 +50,5 @@ IMAGE_INSTALL += " \
     adu-device-info-files \
     "
    
+export IMAGE_NAME_SUFFIX = ""
 export IMAGE_BASENAME = "adu-base-image"
