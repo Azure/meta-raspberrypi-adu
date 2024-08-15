@@ -288,3 +288,5 @@ DISTRO_FEATURES:append = " usrmerge"
 DISTRO_FEATURES_BACKFILL_CONSIDERED += "sysvinit"
 VIRTUAL-RUNTIME_init_manager = "systemd"
 VIRTUAL-RUNTIME_initscripts = "systemd-compat-units"
+
+LICENSE_FLAGS_ACCEPTED="synaptic-killswitch"
