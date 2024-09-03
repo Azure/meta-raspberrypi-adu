@@ -8,7 +8,7 @@
 # an incompatible fstab file.
 
 # Boot partition containing bootloader. This must be the first entry.
-part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 20 --fsoptions "defaults,sync"
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 100 --fsoptions "defaults,sync"
 
 # Primary rootfs partition. This must be the second entry.
 part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootA --align 4096 --extra-space 512

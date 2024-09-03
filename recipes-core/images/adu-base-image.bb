@@ -5,8 +5,7 @@ DESCRIPTION = "ADU base image"
 SECTION = ""
 LICENSE="CLOSED"
 
-# Base this image on core-image-minimal
-include recipes-core/images/core-image-minimal.bb
+inherit core-image
 
 # .wks file is used to create partitions in image.
 WKS_FILE:raspberrypi4 = "adu-raspberrypi.wks"
@@ -50,4 +49,5 @@ IMAGE_INSTALL += " \
     adu-device-info-files \
     "
    
+export IMAGE_NAME_SUFFIX = ""
 export IMAGE_BASENAME = "adu-base-image"
