@@ -1,5 +1,31 @@
 fdt addr ${fdt_addr} && fdt get value bootargs /chosen bootargs
 fatload mmc 0:1 ${kernel_addr_r} @@KERNEL_IMAGETYPE@@
+
 if test ! -e @@BOOT_MEDIA@@ 0:1 uboot.env; then saveenv; fi;
-if env exists rpipart;then setenv bootargs "${bootargs} root=/dev/mmcblk0p${rpipart}"; fi
+
+if env exists rpipart;
+then 
+  if env exists have_updated; then
+    if test "${boot_attempts}" = "3";
+    then 
+      # do a reversion based upon rpipart
+      if test "${rpipart}" = "2"; then
+        # Revert to three
+        setenv rpipart 3
+        setenv boot_attempts 0
+      else
+        if test "${rpipart}" = "3"; then
+          # Revert to two
+          setenv rpipart 2
+          setenv boot_attempts 0
+        fi
+      fi
+
+    fi
+  fi
+  
+  setenv bootargs "${bootargs} root=/dev/mmcblk0p${rpipart}"; 
+fi
+
+setenv boot_attempts boot_attempts + 1
 @@KERNEL_BOOTCMD@@ ${kernel_addr_r} - ${fdt_addr}
