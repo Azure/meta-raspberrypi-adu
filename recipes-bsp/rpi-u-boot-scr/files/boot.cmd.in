@@ -5,7 +5,7 @@ if test ! -e @@BOOT_MEDIA@@ 0:1 uboot.env; then saveenv; fi;
 
 if env exists rpipart;
 then 
-  if env exists have_updated; then
+  if test "${have_updated}" = 1; then
     if test "${boot_attempts}" = "3";
     then 
       # do a reversion based upon rpipart
