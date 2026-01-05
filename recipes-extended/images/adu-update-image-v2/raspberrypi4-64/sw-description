@@ -7,8 +7,8 @@ software =
             copy1 : {
                 images: (
                     {
-                        filename = "adu-base-1-image-@@MACHINE@@.ext4.gz";
-                        sha256 = "$swupdate_get_sha256(adu-base-1-image-@@MACHINE@@.ext4.gz)";
+                        filename = "adu-base-image-@@MACHINE@@.ext4.gz";
+                        sha256 = "$swupdate_get_sha256(adu-base-image-@@MACHINE@@.ext4.gz)";
                         type = "raw";
                         compressed = "zlib";
                         device = "/dev/mmcblk0p2";
@@ -18,8 +18,8 @@ software =
             copy2 : {
                 images: (
                     {
-                        filename = "adu-base-1-image-@@MACHINE@@.ext4.gz";
-                        sha256 = "$swupdate_get_sha256(adu-base-1-image-@@MACHINE@@.ext4.gz)";
+                        filename = "adu-base-image-@@MACHINE@@.ext4.gz";
+                        sha256 = "$swupdate_get_sha256(adu-base-image-@@MACHINE@@.ext4.gz)";
                         type = "raw";
                         compressed = "zlib";
                         device = "/dev/mmcblk0p3";
