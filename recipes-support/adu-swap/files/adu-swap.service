@@ -1,0 +1,17 @@
+[Unit]
+Description=Setup ADU Swap File for Delta Updates
+Documentation=man:adu-swap(8)
+After=adu.mount
+Requires=adu.mount
+Before=adu-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/adu-setup-swap
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
