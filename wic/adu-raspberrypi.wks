@@ -17,7 +17,29 @@ part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootA --align 4096
 # This must be the third entry.
 part --source rootfs --ondisk mmcblk0 --fstype=ext4 --label rootB --align 4096 --extra-space 512
 
-# ADU partition for ADU specific configuration and logs.
+# ADU partition for ADU specific configuration, logs, delta staging, and swap.
 # This partition allows configuration and logs to persist across updates (similar to a user data partition).
-# The vfat file type allows this partition to be viewed and written to from Linux or Windows.
-part /adu --ondisk mmcblk0 --fstype=vfat --label adu --align 4096 --size 512 --fsoptions "umask=0027,gid=800,uid=800"
+# The ext4 file type provides proper ACL support, journaling, and reliability.
+# Size set to 8GB to support delta update staging (needs ~2GB for rootfs reconstruction) + 2GB swap file.
+part /adu --ondisk mmcblk0 --fstype=ext4 --label adu --align 4096 --size 8192
+
+# Optional customer data partition for application-specific data storage.
+# FAT32 allows easy access from multiple operating systems.
+# This partition persists across updates and can be used for logs, configs, or user data.
+#
+# IMPORTANT: Adding a 5th partition requires GPT (GUID Partition Table) instead of MBR.
+# MBR (Master Boot Record) only supports 4 primary partitions. To add this partition:
+#   1. Add 'bootloader --ptable gpt' at the top of this file (after comments)
+#   2. Test thoroughly on target hardware - Raspberry Pi firmware may have limited GPT support
+#   3. Uncomment the fstab entry in recipes-core/base-files/base-files/raspberrypi4-64/fstab
+#   4. Ensure /data directory is created in base-files_%.bbappend
+#
+# GPT vs MBR:
+#   - MBR: Legacy standard, 4 primary partitions max, universally supported
+#   - GPT: Modern standard, 128 partitions, larger disks (>2TB), more reliable
+#   - Raspberry Pi 4 should support GPT boot, but older models may not
+#
+# WARNING: Switching to GPT may cause boot failures on some Raspberry Pi firmware versions.
+# Test on non-production hardware first!
+#
+# part /data --ondisk mmcblk0 --fstype=vfat --label data --align 4096 --size 1024
