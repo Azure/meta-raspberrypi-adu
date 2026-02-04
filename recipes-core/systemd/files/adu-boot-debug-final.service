@@ -1,0 +1,32 @@
+[Unit]
+Description=ADU Boot Debug Final Snapshot
+Documentation=https://github.com/Azure/iot-hub-device-update-yocto
+DefaultDependencies=no
+After=multi-user.target
+ConditionKernelCommandLine=adu_debug=1
+RequiresMountsFor=/boot
+
+[Service]
+Type=oneshot
+
+# Wait for system to settle
+ExecStartPre=/bin/sleep 5
+
+# Create diagnostics directory and capture final journal state
+ExecStart=/bin/sh -c 'mkdir -p /boot/adu-diags && journalctl -b -o short-precise > /boot/adu-diags/rpi-boot-journal-final.log'
+
+# Capture final unit status
+ExecStart=/bin/sh -c 'systemctl list-units --all > /boot/adu-diags/rpi-boot-units-final.log'
+
+# Capture final boot analysis
+ExecStart=/bin/sh -c 'systemd-analyze plot > /boot/adu-diags/rpi-boot-timeline.svg 2>&1 || true'
+ExecStart=/bin/sh -c 'systemd-analyze blame > /boot/adu-diags/rpi-boot-blame.log 2>&1 || true'
+
+# Create completion marker
+ExecStart=/bin/sh -c 'echo "Boot debug capture completed at $(date)" > /boot/adu-diags/rpi-boot-debug-complete.txt'
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
