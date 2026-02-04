@@ -1,0 +1,327 @@
+#!/bin/bash
+# Copyright (c) Azure Device Update for IoT Hub.
+# Licensed under the MIT License.
+
+#
+# Manual Boot Confirmation Tool
+#
+# This tool allows operators to manually override boot validation failures
+# and confirm that the system is working correctly.
+#
+
+set -euo pipefail
+
+# Constants
+readonly STATE_FILE="/var/run/adu-validation-state"
+readonly OVERRIDE_FLAG="/var/run/adu-boot-confirmed"
+readonly UBOOT_ENV="/usr/bin/fw_printenv"
+readonly UBOOT_SETENV="/usr/bin/fw_setenv"
+readonly VALIDATION_SERVICE="adu-boot-validation.service"
+
+# Color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly NC='\033[0m' # No Color
+
+# Usage information
+usage() {
+    cat <<EOF
+Usage: adu-confirm-boot <command>
+
+Commands:
+  status    Show current boot validation status
+  confirm   Manually confirm boot success (requires sudo)
+  help      Show this help message
+
+Examples:
+  adu-confirm-boot status           # Check current status
+  sudo adu-confirm-boot confirm     # Override failed validation
+  
+EOF
+    exit 0
+}
+
+# Get U-Boot environment variable
+get_uboot_env() {
+    local var_name="$1"
+    local value
+    value=$($UBOOT_ENV "$var_name" 2>/dev/null | cut -d= -f2- || echo "")
+    echo "$value"
+}
+
+# Set U-Boot environment variable
+set_uboot_env() {
+    local var_name="$1"
+    local value="$2"
+    
+    if ! $UBOOT_SETENV "$var_name" "$value" 2>&1; then
+        echo -e "${RED}ERROR: Failed to set U-Boot variable: $var_name${NC}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Show current status
+show_status() {
+    echo -e "${BLUE}=== ADU Boot Validation Status ===${NC}"
+    echo ""
+    
+    # Check U-Boot environment
+    local upgrade_available
+    local boot_result
+    local boot_partition
+    local boot_attempts
+    
+    upgrade_available=$(get_uboot_env "upgrade_available")
+    boot_result=$(get_uboot_env "boot_result")
+    boot_partition=$(get_uboot_env "boot_partition")
+    boot_attempts=$(get_uboot_env "boot_attempts")
+    
+    echo "U-Boot Status:"
+    echo "  Boot Partition:     $boot_partition"
+    echo "  Upgrade Available:  $upgrade_available"
+    echo "  Boot Result:        $boot_result"
+    echo "  Boot Attempts:      $boot_attempts"
+    echo ""
+    
+    # Check validation state
+    if [[ -f "$STATE_FILE" ]]; then
+        echo "Validation Results:"
+        
+        local status
+        local timestamp
+        local critical_failures
+        local warnings
+        local total_checks
+        
+        status=$(grep "^STATUS=" "$STATE_FILE" | cut -d= -f2)
+        timestamp=$(grep "^TIMESTAMP=" "$STATE_FILE" | cut -d= -f2)
+        critical_failures=$(grep "^CRITICAL_FAILURES=" "$STATE_FILE" | cut -d= -f2)
+        warnings=$(grep "^WARNINGS=" "$STATE_FILE" | cut -d= -f2)
+        total_checks=$(grep "^TOTAL_CHECKS=" "$STATE_FILE" | cut -d= -f2)
+        
+        echo "  Status:             $status"
+        echo "  Timestamp:          $timestamp"
+        echo "  Total Checks:       $total_checks"
+        
+        if [[ "$critical_failures" -gt 0 ]]; then
+            echo -e "  ${RED}Critical Failures:  $critical_failures${NC}"
+        else
+            echo -e "  ${GREEN}Critical Failures:  $critical_failures${NC}"
+        fi
+        
+        if [[ "$warnings" -gt 0 ]]; then
+            echo -e "  ${YELLOW}Warnings:           $warnings${NC}"
+        else
+            echo "  Warnings:           $warnings"
+        fi
+        
+        echo ""
+        
+        # Show individual check results
+        if [[ "$total_checks" -gt 0 ]]; then
+            echo "Check Details:"
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^CHECK:(.+)=(.+)$ ]]; then
+                    local check_name="${BASH_REMATCH[1]}"
+                    local check_result="${BASH_REMATCH[2]}"
+                    
+                    case "$check_result" in
+                        passed)
+                            echo -e "  ${GREEN}✓${NC} $check_name"
+                            ;;
+                        failed)
+                            echo -e "  ${RED}✗${NC} $check_name"
+                            ;;
+                        warning)
+                            echo -e "  ${YELLOW}⚠${NC} $check_name"
+                            ;;
+                        skipped)
+                            echo "  - $check_name (skipped)"
+                            ;;
+                        *)
+                            echo "  ? $check_name ($check_result)"
+                            ;;
+                    esac
+                fi
+            done < "$STATE_FILE"
+            echo ""
+        fi
+        
+        # Show failure details
+        if [[ "$critical_failures" -gt 0 ]]; then
+            echo -e "${RED}Critical Failures:${NC}"
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^CRITICAL:(.+)$ ]]; then
+                    echo "  - ${BASH_REMATCH[1]}"
+                fi
+            done < "$STATE_FILE"
+            echo ""
+        fi
+        
+        if [[ "$warnings" -gt 0 ]]; then
+            echo -e "${YELLOW}Warnings:${NC}"
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^WARNING:(.+)$ ]]; then
+                    echo "  - ${BASH_REMATCH[1]}"
+                fi
+            done < "$STATE_FILE"
+            echo ""
+        fi
+        
+    else
+        echo "Validation Results: No validation state file found"
+        echo ""
+    fi
+    
+    # Check systemd service status
+    echo "Service Status:"
+    if systemctl is-active --quiet "$VALIDATION_SERVICE"; then
+        echo -e "  ${GREEN}$VALIDATION_SERVICE: active${NC}"
+    else
+        echo -e "  ${RED}$VALIDATION_SERVICE: inactive${NC}"
+    fi
+    echo ""
+    
+    # Show manual override status
+    if [[ -f "$OVERRIDE_FLAG" ]]; then
+        echo -e "${GREEN}Manual override is ACTIVE${NC}"
+    elif [[ "$upgrade_available" == "1" && "$boot_result" == "failed" ]]; then
+        echo -e "${YELLOW}Manual override is AVAILABLE${NC}"
+        echo "  Run: sudo adu-confirm-boot confirm"
+    else
+        echo "Manual override: Not applicable"
+    fi
+}
+
+# Confirm boot
+confirm_boot() {
+    # Check if running as root
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}ERROR: This command must be run as root (use sudo)${NC}" >&2
+        exit 1
+    fi
+    
+    echo -e "${BLUE}=== Manual Boot Confirmation ===${NC}"
+    echo ""
+    
+    # Check current state
+    local upgrade_available
+    local boot_result
+    local boot_partition
+    
+    upgrade_available=$(get_uboot_env "upgrade_available")
+    boot_result=$(get_uboot_env "boot_result")
+    boot_partition=$(get_uboot_env "boot_partition")
+    
+    if [[ "$upgrade_available" != "1" ]]; then
+        echo -e "${YELLOW}System is not in upgrade mode (upgrade_available=$upgrade_available)${NC}"
+        echo "Manual confirmation is not needed."
+        exit 0
+    fi
+    
+    if [[ "$boot_result" == "success" ]]; then
+        echo -e "${GREEN}Boot validation already succeeded${NC}"
+        echo "Manual confirmation is not needed."
+        exit 0
+    fi
+    
+    # Show current status
+    echo "Current Boot Status:"
+    echo "  Boot Partition:    $boot_partition"
+    echo "  Boot Result:       $boot_result"
+    echo "  Upgrade Available: $upgrade_available"
+    echo ""
+    
+    # Show validation failures if available
+    if [[ -f "$STATE_FILE" ]]; then
+        local critical_failures
+        critical_failures=$(grep "^CRITICAL_FAILURES=" "$STATE_FILE" | cut -d= -f2)
+        
+        if [[ "$critical_failures" -gt 0 ]]; then
+            echo -e "${RED}Critical Failures Detected:${NC}"
+            while IFS= read -r line; do
+                if [[ "$line" =~ ^CRITICAL:(.+)$ ]]; then
+                    echo "  - ${BASH_REMATCH[1]}"
+                fi
+            done < "$STATE_FILE"
+            echo ""
+        fi
+    fi
+    
+    # Warning message
+    echo -e "${YELLOW}WARNING:${NC}"
+    echo "  You are about to manually override the boot validation."
+    echo "  This will mark the current partition as successfully booted,"
+    echo "  even though automated validation checks have failed."
+    echo ""
+    echo -e "${RED}  Make sure you have verified that the system is working correctly!${NC}"
+    echo ""
+    
+    # Confirmation prompt
+    read -p "Are you sure you want to confirm this boot? (yes/no): " confirmation
+    
+    if [[ "$confirmation" != "yes" ]]; then
+        echo "Confirmation cancelled."
+        exit 0
+    fi
+    
+    echo ""
+    echo "Creating manual override flag..."
+    touch "$OVERRIDE_FLAG"
+    
+    echo "Restarting validation service to apply override..."
+    if ! systemctl restart "$VALIDATION_SERVICE"; then
+        echo -e "${RED}ERROR: Failed to restart validation service${NC}" >&2
+        rm -f "$OVERRIDE_FLAG"
+        exit 1
+    fi
+    
+    # Wait a moment for service to complete
+    sleep 2
+    
+    # Verify the override was applied
+    boot_result=$(get_uboot_env "boot_result")
+    upgrade_available=$(get_uboot_env "upgrade_available")
+    
+    if [[ "$boot_result" == "success" && "$upgrade_available" == "0" ]]; then
+        echo -e "${GREEN}✓ Boot confirmed successfully${NC}"
+        echo ""
+        echo "The system is now marked as stable."
+        echo "The update has been accepted."
+    else
+        echo -e "${RED}ERROR: Failed to confirm boot${NC}" >&2
+        echo "boot_result=$boot_result, upgrade_available=$upgrade_available"
+        exit 1
+    fi
+}
+
+# Main entry point
+main() {
+    if [[ $# -lt 1 ]]; then
+        usage
+    fi
+    
+    local command="$1"
+    
+    case "$command" in
+        status)
+            show_status
+            ;;
+        confirm)
+            confirm_boot
+            ;;
+        help|--help|-h)
+            usage
+            ;;
+        *)
+            echo "ERROR: Unknown command: $command" >&2
+            echo ""
+            usage
+            ;;
+    esac
+}
+
+main "$@"

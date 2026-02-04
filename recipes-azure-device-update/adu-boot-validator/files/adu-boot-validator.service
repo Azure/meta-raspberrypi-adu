@@ -1,0 +1,23 @@
+[Unit]
+Description=ADU Boot Validator - Detects rollbacks and validates boot partition
+Documentation=https://docs.microsoft.com/azure/iot-hub-device-update
+After=network.target
+Before=deviceupdate-agent.service
+Wants=network.target
+ConditionPathExists=/usr/lib/adu/adu-boot-validator.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/adu/adu-boot-validator.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/adu/states /var/lock
+
+[Install]
+WantedBy=multi-user.target

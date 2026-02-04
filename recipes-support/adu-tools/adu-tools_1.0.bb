@@ -10,18 +10,25 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 SRC_URI = " \
     file://adu-wifi-diagnostics.sh \
+    file://adu-wifi-setup.sh \
+    file://adu-splash-screen-diagnostics.sh \
+    file://adu-motd.sh \
+    file://adu-ctl \
+    file://GETTING-STARTED.txt \
 "
 
 S = "${WORKDIR}"
+
+# No systemd inherit - we'll manually install the service file and enable it
 
 # Dependencies
 RDEPENDS:${PN} = " \
     bash \
     iw \
-    wireless-tools \
     rfkill \
     util-linux \
     coreutils \
+    git \
 "
 
 # Optional dependencies (should be present if WiFi/BT enabled, but not required)
@@ -33,33 +40,77 @@ RRECOMMENDS:${PN} = " \
 "
 
 do_install() {
-    # Create /adu/tools directory (safe if already exists from other recipes)
-    # Note: install -d is idempotent and won't conflict with other recipes
-    # as long as each recipe only claims its own files in FILES:${PN}
-    install -d ${D}/adu/tools
+    # Install executables to /usr/sbin/ (FHS-compliant location for system admin scripts)
+    install -d ${D}${sbindir}
+    install -m 0755 ${WORKDIR}/adu-wifi-diagnostics.sh ${D}${sbindir}/
+    install -m 0755 ${WORKDIR}/adu-wifi-setup.sh ${D}${sbindir}/
+    install -m 0755 ${WORKDIR}/adu-splash-screen-diagnostics.sh ${D}${sbindir}/
+    install -m 0755 ${WORKDIR}/adu-motd.sh ${D}${sbindir}/
     
-    # Install WiFi diagnostics script
-    install -m 0755 ${WORKDIR}/adu-wifi-diagnostics.sh ${D}/adu/tools/
+    # Install adu-ctl to /usr/bin/ (user-facing command)
+    install -d ${D}${bindir}
+    install -m 0755 ${WORKDIR}/adu-ctl ${D}${bindir}/
     
-    # Create diagnostics output directory on boot partition
-    # Note: /boot is mounted from mmcblk0p1, accessible from any system
-    install -d ${D}/boot/adu-diags
+    # Install MOTD profile.d script
+    install -d ${D}${sysconfdir}/profile.d
+    echo '#!/bin/sh' > ${D}${sysconfdir}/profile.d/adu-motd.sh
+    echo '# Display ADU device information on login' >> ${D}${sysconfdir}/profile.d/adu-motd.sh
+    echo 'if [ -n "$PS1" ]; then' >> ${D}${sysconfdir}/profile.d/adu-motd.sh
+    echo '    /usr/sbin/adu-motd.sh 2>/dev/null || true' >> ${D}${sysconfdir}/profile.d/adu-motd.sh
+    echo 'fi' >> ${D}${sysconfdir}/profile.d/adu-motd.sh
+    chmod 0755 ${D}${sysconfdir}/profile.d/adu-motd.sh
     
-    # Create a README in /adu/tools
-    cat > ${D}/adu/tools/README.txt << 'EOF'
-ADU Tools Directory
-===================
+    # ADU bashrc disabled - conflicts with base-files package
+    # To re-enable, need to use bbappend approach instead of direct replacement
+    # install -d ${D}${sysconfdir}/skel
+    # install -m 0644 ${WORKDIR}/adu-bashrc ${D}${sysconfdir}/skel/.bashrc
+    
+    # Install documentation to /usr/share/doc/adu/
+    install -d ${D}${docdir}/adu
+    install -m 0644 ${WORKDIR}/GETTING-STARTED.txt ${D}${docdir}/adu/
+    
+    # Create a README
+    cat > ${D}${docdir}/adu/README.txt << 'EOF'
+ADU Tools & Documentation
+=========================
 
-This directory contains diagnostic and utility tools for Azure Device Update images.
+This directory contains documentation for Azure Device Update images.
+Utility scripts are installed in /usr/sbin/.
 
 Available Tools:
 ----------------
 
-1. adu-wifi-diagnostics.sh
+1. adu-wifi-setup.sh (RECOMMENDED FOR FIRST TIME SETUP)
+   - Interactive WiFi connection wizard
+   - Usage: sudo adu-wifi-setup.sh
+   - Location: /usr/sbin/adu-wifi-setup.sh
+   - Guides you through connecting to WiFi networks
+
+2. adu-wifi-diagnostics.sh
    - Comprehensive WiFi/Bluetooth diagnostic collection
-   - Usage: sudo /adu/tools/adu-wifi-diagnostics.sh
+   - Usage: sudo adu-wifi-diagnostics.sh
+   - Location: /usr/sbin/adu-wifi-diagnostics.sh
    - Output: /boot/adu-diags/wifi-diag-YYYYMMDD-HHMMSS.txt
    - Access output from another PC by mounting boot partition
+
+3. adu-ctl
+   - ADU Agent control and management tool
+   - Usage: adu-ctl <command> [options]
+   - Location: /usr/bin/adu-ctl
+   - Commands:
+     * service start|stop|restart|status - Manage ADU service
+     * journal [-f] - View agent logs
+     * run [options] - Run agent in standalone mode
+     * health - Quick health check
+     * diag [-v] - Create support bundle
+     * config - Validate configuration
+     * info - Show device information
+     See 'adu-ctl help' for full list
+
+4. GETTING-STARTED.txt
+   - Complete user manual for setting up your ADU device
+   - Covers WiFi setup, IoT Hub connection, and first update
+   - Usage: cat /usr/share/doc/adu/GETTING-STARTED.txt
 
 Documentation:
 --------------
@@ -85,23 +136,20 @@ EOF
 
 # Package files
 FILES:${PN} = " \
-    /adu/tools/adu-wifi-diagnostics.sh \
-    /adu/tools/README.txt \
-    /boot/adu-diags \
+    ${sbindir}/adu-wifi-diagnostics.sh \
+    ${sbindir}/adu-wifi-setup.sh \
+    ${sbindir}/adu-splash-screen-diagnostics.sh \
+    ${sbindir}/adu-motd.sh \
+    ${bindir}/adu-ctl \
+    ${sysconfdir}/profile.d/adu-motd.sh \
+    ${docdir}/adu/GETTING-STARTED.txt \
+    ${docdir}/adu/README.txt \
 "
 
-# Make sure /adu/tools is owned by root with proper permissions
-# /boot/adu-diags should be world-writable so scripts can write to it
-do_install:append() {
-    # /adu/tools owned by root, readable by all, writable by root
-    chown -R root:root ${D}/adu/tools
-    chmod 755 ${D}/adu/tools
-    chmod 755 ${D}/adu/tools/*.sh
-    chmod 644 ${D}/adu/tools/README.txt
-    
-    # /boot/adu-diags writable by all (scripts need to create files)
-    chmod 777 ${D}/boot/adu-diags
-}
+# Note: /boot/adu-diags directory is created on-demand by scripts that need it (mkdir -p)
+# No need to pre-create the directory or use systemd services for this.
 
-# No need for systemd or sysvinit services - these are manual tools
-inherit allarch
+# Make sure permissions are correct at packaging time
+# Note: chown operations in do_install are not recommended in Yocto
+#       File ownership is handled by the packaging system
+

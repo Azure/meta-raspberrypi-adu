@@ -6,11 +6,31 @@ SECTION = ""
 LICENSE="CLOSED"
 
 inherit core-image
+inherit extrausers
 
-# Disable Plymouth splash screen and quiet mode for interactive boot menu
-# The boot menu needs console access and visible kernel messages
+# Provide virtual base image for meta-azure-device-update-samples layer
+PROVIDES = "virtual/adu-base-image"
+
+# Software version for the base image
+# This version will be written to /etc/adu-version via adu-device-info-files recipe
+# Default: 0.0.1.0 (factory/initial version for SD card flashing)
+# Update images will override ADU_SOFTWARE_VERSION to force different versions
+ADU_SOFTWARE_VERSION ??= "0.0.1.0"
+
+# Set root password from build.sh (ADU_ROOT_PASSWD environment variable)
+# Only set password if ADU_ROOT_PASSWD is non-empty
+# Note: Password hash is already SHA512 encrypted by build.sh
+def get_root_password_param(d):
+    passwd = d.getVar('ADU_ROOT_PASSWD')
+    if passwd:
+        # Use single quotes to prevent shell interpretation of $ in hash
+        return "usermod -p '%s' root;" % passwd
+    return ''
+
+EXTRA_USERS_PARAMS = "${@get_root_password_param(d)}"
+
+# Remove quiet mode to show kernel messages during boot (helpful for debugging)
 CMDLINE:remove = "quiet splash"
-CMDLINE:append = " plymouth.enable=0"
 
 # For WIC image generation, we need kernel and bootloader files deployed
 # Same dependencies as meta-raspberrypi/conf/machine/include/rpi-base.inc
@@ -49,13 +69,18 @@ IMAGE_FEATURES += " debug-tweaks tools-debug package-management"
 # python3-setuptools - provides python3 related components
 # apt  - provide apt, apt-*, and dpkg components
 # nano - a basic text editor for convenience
-# adu-boot-health - validates successful boot and marks boot_attempts=0
+# adu-boot-validator - NEW v2.0: detects rollbacks before agent starts (no circular dependency)
 # adu-swap - creates 2GB swap file in /adu partition for delta reconstruction
 # adu-config-setup - creates /adu/ directory structure and symlinks
-# adu-boot-validation - comprehensive boot validation with manual override
+# adu-persistent-overlay - hybrid overlayfs + bind mounts for data persistence
+# adu-diskutil - interactive USB storage mount/unmount tool
 # adu-boot-debug - DISABLED - captures boot logs when adu_debug=1 kernel parameter set
 # adu-boot-menu - DISABLED - boot menu service
-# adu-boot-splash - DISABLED - customizes boot splash (disables Plymouth, shows kernel messages)
+# REMOVED: adu-boot-health - replaced by adu-boot-validator (design v2.0)
+# Boot validation services (BOTH required):
+# - adu-boot-validator: Rollback detection and flapping prevention
+# - adu-boot-validation: Post-update health checks and U-Boot env variable management
+# REMOVED: adu-boot-splash - Plymouth boot splash (non-functional, deprecated Jan 2026)
 IMAGE_INSTALL += " \
     sudo \
     parted \
@@ -77,11 +102,33 @@ IMAGE_INSTALL += " \
     adu-config-setup \
     adu-agent-service \
     adu-device-info-files \
-    adu-boot-health \
+    adu-boot-validator \
     adu-boot-validation \
     adu-swap \
+    adu-persistent-overlay \
     adu-tools \
+    adu-diskutil \
+    adu-diag \
+    yocto-a-b-update \
     "
+
+# Create empty directories in rootfs for bind mount targets
+# These will be mounted to /adu/data/* by adu-persistent-overlay.service
+ROOTFS_POSTPROCESS_COMMAND += "create_adu_bind_targets ; "
+
+create_adu_bind_targets() {
+    # Create /var/lib/adu subdirectories in rootfs (bind mount targets)
+    install -d -m 0770 -o 800 -g 800 ${IMAGE_ROOTFS}/var/lib/adu/downloads
+    install -d -m 0770 -o 800 -g 800 ${IMAGE_ROOTFS}/var/lib/adu/extensions
+    install -d -m 0770 -o 800 -g 800 ${IMAGE_ROOTFS}/var/lib/adu/states
+    # Delta source cache directory used by microsoft-delta-download-handler
+    # Defined in ADU agent CMakeLists.txt: ADUC_DELTA_DOWNLOAD_HANDLER_SOURCE_UPDATE_CACHE_DIR = ${ADUC_DATA_FOLDER}/sdc
+    install -d -m 0770 -o 800 -g 800 ${IMAGE_ROOTFS}/var/lib/adu/sdc
+    # API directory for FIFOs: apireq.fifo lives here (defined in CMakeLists.txt: ${ADUC_DATA_FOLDER}/api/apireq.fifo)
+    install -d -m 0770 -o 800 -g 800 ${IMAGE_ROOTFS}/var/lib/adu/api
+    
+    bbnote "Created /var/lib/adu/{downloads,extensions,states,sdc,api} in rootfs for bind mounts"
+}
    
 export IMAGE_NAME_SUFFIX = ""
 export IMAGE_BASENAME = "adu-base-image"
