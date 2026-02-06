@@ -39,7 +39,7 @@
 Description=Set ADU partition ownership and permissions
 After=adu.mount
 Requires=adu.mount
-Before=adu-swap.service adu-boot-health.service
+Before=adu-swap.service adu-boot-validation.service
 
 [Service]
 Type=oneshot

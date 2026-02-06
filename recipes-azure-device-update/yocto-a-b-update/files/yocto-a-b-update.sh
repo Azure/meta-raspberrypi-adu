@@ -203,7 +203,7 @@ make_aduc_result_json() {
 # 1. When U-Boot detects boot failure (after max_boot_attempts, default 5),
 #    it automatically rolls back to the previous partition
 #
-# 2. adu-boot-validator.sh (runs before ADU agent) detects the rollback by
+# 2. adu-boot-validation.sh (runs before ADU agent) detects the rollback by
 #    comparing expected partition (from state file) to actual partition
 #
 # 3. The validator adds failed workflow_id to persistent file:
@@ -1218,7 +1218,7 @@ CancelUpdate() {
     ret_val=
 
     # Read last_known_good_partition from U-Boot environment
-    # This variable is managed by the boot verification service (adu-boot-validator.sh)
+    # This variable is managed by the boot verification service (adu-boot-validation.sh)
     # which sets it after successful boot validation
     local lkg_partition
     lkg_partition=$(fw_printenv -n last_known_good_partition 2>/dev/null)

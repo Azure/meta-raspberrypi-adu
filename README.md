@@ -5,22 +5,51 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ---
 
-## Quick Start (15 Minutes)
+## Quick Start
 
-Get your Raspberry Pi 4 running with Azure Device Update in 3 steps:
+This is a **Yocto meta layer** that provides Raspberry Pi-specific customizations for Azure Device Update with A/B partition support. It is **not a standalone project** — it must be used as part of a complete Yocto build environment with all required layers.
+
+### What This Layer Provides
+
+- Raspberry Pi BSP customizations for A/B rootfs updates
+- U-Boot boot script with partition switching and rollback logic
+- Boot validation service with health checks
+- WIC partition layout (boot + rootA + rootB + adu)
+- SWUpdate integration for OTA updates
+
+### Layer Dependencies
+
+This layer requires the following layers in your `bblayers.conf`:
+
+| Layer | Purpose | Source |
+|-------|---------|--------|
+| **poky/meta** | Yocto core | https://git.yoctoproject.org/poky |
+| **poky/meta-poky** | Poky distro | (included with poky) |
+| **meta-openembedded/meta-oe** | Additional recipes | https://github.com/openembedded/meta-openembedded |
+| **meta-openembedded/meta-python** | Python support | (included with meta-openembedded) |
+| **meta-openembedded/meta-networking** | Networking tools | (included with meta-openembedded) |
+| **meta-raspberrypi** | Raspberry Pi BSP | https://github.com/agherzan/meta-raspberrypi |
+| **meta-swupdate** | SWUpdate framework | https://github.com/sbabic/meta-swupdate |
+| **meta-clang** | Clang compiler (for delta) | https://github.com/kraj/meta-clang |
+| **meta-azure-device-update** | ADU agent & handlers | https://github.com/azure/meta-azure-device-update|
+| **meta-iot-hub-device-update-delta** | Delta update support | http://github.com/azure/meta-iot-hub-device-update-delta |
+| **meta-raspberrypi-adu** | **This layer** | (this project) |
+
+### Integration Example
+
+For a complete working example of how to integrate all these layers, see the parent repository's build scripts and `bblayers.conf` configuration.
 
 ```bash
-# 1. Clone and build
+# Typical build workflow (from parent iot-hub-device-update-yocto repo)
 cd iot-hub-device-update-yocto
 source yocto/poky/oe-init-build-env ~/adu_yocto/out/build
+
+# Ensure all layers are in bblayers.conf, then:
 bitbake adu-base-image
 
-# 2. Flash to SD card
+# Flash to SD card
 cd ~/adu_yocto/out/build/tmp/deploy/images/raspberrypi4-64/
 sudo bmaptool copy adu-base-image-raspberrypi4-64.wic.gz /dev/sdX
-
-# 3. Boot and connect to Azure IoT Hub
-# Configure connection string in /etc/adu/du-config.json
 ```
 
 **Prerequisites**: Ubuntu 20.04+, 100GB disk space, 16GB RAM (recommended), 16GB+ SD card
@@ -31,7 +60,7 @@ sudo bmaptool copy adu-base-image-raspberrypi4-64.wic.gz /dev/sdX
 
 This Yocto meta layer provides a complete, **production-ready reference implementation** of Azure Device Update (ADU) for Raspberry Pi devices (3B+ and 4) with advanced delta update capabilities and resilient A/B partition management.
 
-**For platform-agnostic design concepts**, see: [ADU A/B Update Architecture Guide](ADU-AB-UPDATE-ARCHITECTURE-GUIDE.md)
+**For platform-agnostic design concepts**, see: [ADU A/B Update Architecture Guide](docs/architecture.md)
 
 ## Purpose
 
@@ -49,7 +78,7 @@ The `meta-raspberrypi-adu` layer enables:
    - Minimal downtime (single reboot for partition switch, automatic rollback on failure)
 
 3. **Delta Update Infrastructure**
-   - Large dedicated partition (4GB) for delta staging and reconstruction
+   - Large dedicated partition (8GB) for delta staging and reconstruction
    - Automatic 2GB swap file for memory-constrained delta operations
    - Microsoft's libadudiffapi for efficient binary patching
    - Reduces bandwidth usage by 60-95% compared to full updates
@@ -75,11 +104,9 @@ The `meta-raspberrypi-adu` layer enables:
 - **Automatic Rollback**: Reverts to previous partition after 3 failed boot attempts
 
 ### Delta Update Support
-- **4GB ADU Partition**: Large staging area for delta reconstruction (ext4)
+- **8GB ADU Partition**: Large staging area for delta reconstruction (ext4)
 - **2GB Swap File**: Automatic swap creation for memory-intensive patching
 - **Binary Differential Updates**: 5-40% of full image size (typical)
-
-**Note**: Plymouth boot splash was removed in v2.0 (non-functional). See [docs/[DEPRECATED]/](docs/[DEPRECATED]/) for archived implementation.
 - **Integrity Verification**: SHA256 checksums for all update files
 
 ### Custom SWUpdate
@@ -104,16 +131,17 @@ The layer creates a 5-partition layout optimized for A/B updates, delta operatio
 
 | Partition | Size | Type | Mount | Purpose | A/B |
 |-----------|------|------|-------|---------|-----|
-| P1: boot | 100MB | FAT32 | /boot | U-Boot, kernel, device tree | ❌ Shared |
+| P1: boot | 2GB | FAT32 | /boot | U-Boot, kernel, device tree | ❌ Shared |
 | P2: rootA | Dynamic+512MB | ext4 | / | Root filesystem - Slot A | ✅ |
 | P3: rootB | Dynamic+512MB | ext4 | / | Root filesystem - Slot B | ✅ |
-| P4: adu | 4GB | ext4 | /adu | ADU data, logs, swap, delta staging | ❌ Shared |
+| P4: adu | 8GB | ext4 | /adu | ADU data, logs, swap, delta staging | ❌ Shared |
 | P5: data | 1GB | FAT32 | /data | **Optional**: Customer data storage | ❌ Shared |
 
-**Why 4GB for /adu?**
+**Why 8GB for /adu?**
 - Delta reconstruction requires ~2GB staging space (rootfs size)
 - 2GB swap file for memory-constrained delta operations
 - Room for logs, health data, and download cache
+- Future expansion headroom
 
 **Optional /data partition:**
 - Persists across updates for application-specific data
@@ -221,7 +249,7 @@ To remove a partition:
 | **Created by** | `azure-device-update` recipe | `base-files` recipe |
 | **Directory creation** | Automatic (ADUC_CONF_DIR=/adu) | Manual (base-files_%.bbappend) |
 | **Filesystem** | ext4 (ACL support, journaling) | vfat (cross-platform compatibility) |
-| **Size** | 512MB-4GB (for delta staging) | Variable (1GB default) |
+| **Size** | 4GB-8GB (for delta staging) | Variable (1GB default) |
 | **Ownership** | adu:adu (800:800) | root:root |
 | **Permissions** | 0770 (restricted to adu group) | 0755 (world-readable) |
 | **Purpose** | ADU system data, logs, swap | Customer application data |
@@ -307,10 +335,10 @@ journalctl -xe | grep mount
 #### Current Partition Count: 4/4 (At MBR Limit)
 
 ```
-P1: /boot  (20MB vfat)   - Primary
+P1: /boot  (2GB vfat)    - Primary
 P2: rootA  (~2GB ext4)   - Primary  
 P3: rootB  (~2GB ext4)   - Primary
-P4: /adu   (512MB ext4)  - Primary
+P4: /adu   (8GB ext4)    - Primary
 ---
 Total: 4 partitions (MBR maximum reached)
 ```
@@ -426,11 +454,12 @@ If GPT compatibility is uncertain, keep the current 4-partition MBR layout:
 ### recipes-support
 **ADU Infrastructure Services**
 
-**adu-boot-health:**
-- Systemd service that validates successful boot
-- Checks critical services, filesystems, network, disk space
+**adu-boot-validation:**
+- Two-phase systemd service that validates successful boot (runs before ADU agent)
+- **Phase 1**: Detects rollbacks, prevents boot flapping, blacklists failed workflows
+- **Phase 2**: Checks critical services, filesystems, network, disk space
 - Marks boot successful via `fw_setenv boot_attempts 0`
-- Logs to `/adu/health/boot-health.log`
+- Logs to `/adu/health/boot-validation.log`
 
 **adu-swap:**
 - Systemd service that creates 2GB swap file
@@ -465,7 +494,7 @@ If GPT compatibility is uncertain, keep the current 4-partition MBR layout:
 ┌──────────────────────────────────────────────────────────────────┐
 │                        SD Card Layout                            │
 ├─────────────┬─────────────┬─────────────┬───────────┬───────────┤
-│ Boot (100M) │ RootA (2G)  │ RootB (2G)  │ ADU (4G)  │ Data (1G) │
+│ Boot (2G)   │ RootA (2G)  │ RootB (2G)  │ ADU (8G)  │ Data (1G) │
 │   (FAT32)   │   (ext4)    │   (ext4)    │  (ext4)   │  (FAT32)  │
 └─────────────┴─────────────┴─────────────┴───────────┴───────────┘
        │              │             │            │           │
@@ -505,25 +534,18 @@ The layer produces:
 
 ## Documentation
 
-**Start here**: [Documentation Index](docs/INDEX.md) — Complete guide with recommended reading paths
+| Document | Description |
+|----------|-------------|
+| ⭐ **[Customization Guide](docs/customization.md)** | **Start here** — All A/B update customizations: partitioning, U-Boot boot script, boot validation, ADU handler integration |
+| [Architecture Guide](docs/architecture.md) | Platform-agnostic A/B rootfs design patterns, storage/RAM requirements |
+| [Porting Guide](docs/porting.md) | Adapt this layer to other hardware platforms |
+| [U-Boot Script](docs/uboot.md) | A/B partition boot logic, variables, rollback |
+| [Troubleshooting](docs/troubleshooting.md) | Common issues and fixes for boot, updates, builds |
 
-### Getting Started
-- **[Quick Start](#quick-start-15-minutes)**: Get running in 15 minutes
-- **[Architecture Guide](ADU-AB-UPDATE-ARCHITECTURE-GUIDE.md)**: Platform-agnostic A/B update design concepts
-- **[Porting Guide](PORTING-GUIDE.md)**: Adapt this layer to other hardware platforms
-
-### Configuration & Testing
-- **[Network Setup](docs/README-ADU-RPI-NETWORK.md)**: WiFi, Bluetooth, and network configuration
-- **[E2E Testing](docs/README-E2E-TESTING.md)**: Complete testing workflow with Azure
-- **[Delta Testing](docs/README-DELTA-TESTING.md)**: Delta update testing and validation
-
-### Troubleshooting & Reference
-- **[Troubleshooting Guide](#troubleshooting)**: Common issues and solutions
-- **[Boot Implementation](docs/README-RPI-BOOT-IMPLEMENTATION.md)**: RPi U-Boot A/B boot process
-- **[Partition Compatibility](docs/README-PARTITION-COMPATIBILITY.md)**: Partition layout details
-
-### Layer Dependencies
-- **[meta-iot-hub-device-update-delta](../meta-iot-hub-device-update-delta/README.md)**: Delta generation tools
+### External Resources
+- [Azure Device Update Documentation](https://learn.microsoft.com/azure/iot-hub-device-update/)
+- [SWUpdate Documentation](https://sbabic.github.io/swupdate/)
+- [U-Boot Documentation](https://u-boot.readthedocs.io/)
 
 ---
 
@@ -545,12 +567,12 @@ The layer produces:
 | **Raspberry Pi 4** (2GB/4GB/8GB) | ✅ Yes | ✅ Yes | ✅ Yes | Recommended |
 | **Raspberry Pi 3B+** | ✅ Yes | ✅ Yes | ⚠️ Limited | Need 4GB+ swap for 1GB+ images |
 | **Raspberry Pi 3B** | ⚠️ Limited | ✅ Yes | ❌ No | 1GB RAM insufficient for delta |
-| **Other Boards** | ❌ No | 🔄 Portable | 🔄 Portable | See [Porting Guide](PORTING-GUIDE.md) |
+| **Other Boards** | ❌ No | 🔄 Portable | 🔄 Portable | See [Porting Guide](docs/porting.md) |
 
 **Delta Update Requirements**:
 - **RAM**: Physical RAM + Swap ≥ Rootfs Size
 - **Example**: 1GB rootfs → Need 512MB RAM + 512MB swap (or 2GB swap for safety)
-- **Storage**: 4GB+ ADU partition (2GB staging + 2GB swap + downloads)
+- **Storage**: 8GB+ ADU partition (2GB staging + 2GB swap + downloads)
 
 ---
 
@@ -735,36 +757,51 @@ df -h /var/lib/adu/
 
 ## Network Configuration
 
-### Quick WiFi Setup
+### WiFi/Bluetooth Support
 
-**Enable WiFi in build**:
+WiFi/Bluetooth is **disabled by default** (requires accepting proprietary firmware license).
+
+**Enable in build** (choose one method):
+
 ```bash
+# Method 1: Environment variable
 export ENABLE_WIFI_BLUETOOTH=1
 export BB_ENV_PASSTHROUGH_ADDITIONS="$BB_ENV_PASSTHROUGH_ADDITIONS ENABLE_WIFI_BLUETOOTH"
 bitbake adu-base-image
+
+# Method 2: Add to local.conf
+echo 'ENABLE_WIFI_BLUETOOTH = "1"' >> build/conf/local.conf
 ```
 
-**Connect to WiFi** (on device):
+**What gets included**: BCM43455 firmware, wpa-supplicant, connman, wireless-tools (~50MB)
+
+### Quick WiFi Setup (on device)
+
 ```bash
-# Unblock WiFi
+# 1. Unblock WiFi
 rfkill unblock wifi
 ip link set wlan0 up
 
-# Connect using wpa_supplicant
-wpa_passphrase "YourSSID" "YourPassword" > /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
-systemctl restart wpa_supplicant@wlan0
+# 2. Connect using connman
+connmanctl
+> enable wifi
+> scan wifi
+> services
+> agent on
+> connect wifi_<id>_YourSSID_managed_psk
+# Enter password when prompted
+> quit
+
+# 3. Verify
+ip addr show wlan0
+ping -c 4 8.8.8.8
 ```
 
-**Or use systemd-networkd** (add to `/etc/systemd/network/25-wlan0.network`):
-```ini
-[Match]
-Name=wlan0
-
-[Network]
-DHCP=yes
+**Alternative (wpa_supplicant)**:
+```bash
+wpa_passphrase "YourSSID" "YourPassword" | tee /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+systemctl enable --now wpa_supplicant@wlan0
 ```
-
-**For complete WiFi/Bluetooth configuration**, see [docs/README-ADU-RPI-NETWORK.md](docs/README-ADU-RPI-NETWORK.md)
 
 ---
 
@@ -781,20 +818,20 @@ DHCP=yes
 
 **Debug**:
 ```bash
-# Check boot health logs
-tail -50 /adu/health/boot-health.log
-journalctl -u adu-boot-health.service -b -1  # Previous boot
+# Check boot validation logs
+tail -50 /adu/health/boot-validation.log
+journalctl -u adu-boot-validation.service -b -1  # Previous boot
 
 # Check failed services
 systemctl --failed
 
 # Manual health check
-/usr/bin/adu-boot-health-check
+/usr/lib/adu/adu-boot-validation.sh
 ```
 
 **Solutions**:
 - Fix failing service
-- Adjust health check criteria in `/usr/bin/adu-boot-health-check`
+- Adjust health check criteria in `/usr/lib/adu/adu-boot-validation.sh`
 - Verify network connectivity
 
 ### Update Package Won't Install
@@ -900,14 +937,14 @@ rm -f tmp/deploy/images/raspberrypi4-64/manifest-*-adu-update-image-v*.deploy
 bitbake adu-update-image-v1
 ```
 
-**For comprehensive troubleshooting**, see [docs/README-TROUBLESHOOTING.md](docs/README-TROUBLESHOOTING.md)
+**For comprehensive troubleshooting**, see [Troubleshooting Guide](docs/troubleshooting.md)
 
 ---
 
 ## Key Differences from Standard Raspberry Pi Images
 
 1. **A/B Partitions**: Two root filesystems instead of one
-2. **Large ADU Partition**: 4GB dedicated space for updates and swap
+2. **Large ADU Partition**: 8GB dedicated space for updates and swap
 3. **Optional Data Partition**: 1GB customer data storage (FAT32)
 4. **Boot Health**: Automatic validation and rollback system
 5. **ACL Security**: Restricted access to ADU data

@@ -1,9 +1,10 @@
 [Unit]
-Description=ADU Boot Validation Service
+Description=ADU Boot Validation - Rollback detection and health checks for A/B updates
 Documentation=https://github.com/Azure/iot-hub-device-update
-After=network-online.target systemd-journald.service
-Before=multi-user.target
-Wants=network-online.target
+After=local-fs.target network.target
+Before=deviceupdate-agent.service multi-user.target
+Wants=network.target
+ConditionPathExists=/usr/bin/adu-boot-validation.sh
 
 [Service]
 Type=oneshot
@@ -13,7 +14,13 @@ TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal
 
-# Restart policy - don't restart on failure (we want to reboot instead)
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/adu /var/lib/adu/states /var/lock /var/log/adu /var/run
+
+# Don't restart on failure - we want to continue boot
 Restart=no
 
 [Install]

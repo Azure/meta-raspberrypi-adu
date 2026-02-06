@@ -112,7 +112,7 @@ fw_printenv boot_partition boot_attempts boot_result
 1. Document in DEVICE-BOOT-PROCESS.md first
 2. Initialize in first-boot section of boot.cmd.in
 3. Update adu-boot-menu.sh to display new variables
-4. Update adu-boot-health.sh if variables need to be set from Linux
+4. Update adu-boot-validation.sh if variables need to be set from Linux
 5. Update adu-decode-error if adding error codes
 
 ---

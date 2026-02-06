@@ -69,17 +69,15 @@ IMAGE_FEATURES += " debug-tweaks tools-debug package-management"
 # python3-setuptools - provides python3 related components
 # apt  - provide apt, apt-*, and dpkg components
 # nano - a basic text editor for convenience
-# adu-boot-validator - NEW v2.0: detects rollbacks before agent starts (no circular dependency)
+# adu-boot-validation - UNIFIED: rollback detection + health checks + blacklisting (merged Feb 2026)
 # adu-swap - creates 2GB swap file in /adu partition for delta reconstruction
 # adu-config-setup - creates /adu/ directory structure and symlinks
 # adu-persistent-overlay - hybrid overlayfs + bind mounts for data persistence
 # adu-diskutil - interactive USB storage mount/unmount tool
 # adu-boot-debug - DISABLED - captures boot logs when adu_debug=1 kernel parameter set
 # adu-boot-menu - DISABLED - boot menu service
-# REMOVED: adu-boot-health - replaced by adu-boot-validator (design v2.0)
-# Boot validation services (BOTH required):
-# - adu-boot-validator: Rollback detection and flapping prevention
-# - adu-boot-validation: Post-update health checks and U-Boot env variable management
+# REMOVED: adu-boot-health - replaced by adu-boot-validation
+# REMOVED: adu-boot-validator - merged into adu-boot-validation (Feb 2026)
 # REMOVED: adu-boot-splash - Plymouth boot splash (non-functional, deprecated Jan 2026)
 IMAGE_INSTALL += " \
     sudo \
@@ -102,7 +100,6 @@ IMAGE_INSTALL += " \
     adu-config-setup \
     adu-agent-service \
     adu-device-info-files \
-    adu-boot-validator \
     adu-boot-validation \
     adu-swap \
     adu-persistent-overlay \
