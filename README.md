@@ -117,7 +117,7 @@ The `meta-raspberrypi-adu` layer enables:
 ### Boot Health System
 - **Post-Boot Validation**: Validates critical services, filesystems, and network
 - **Success Marking**: Resets boot counter via `fw_setenv boot_attempts 0`
-- **Health Logging**: Detailed logs in `/adu/health/boot-health.log`
+- **Health Logging**: Detailed logs in `/var/log/adu/boot-validation.log`
 - **Failure Detection**: Triggers automatic rollback on validation failure
 
 ### Security and Access Control
@@ -459,7 +459,22 @@ If GPT compatibility is uncertain, keep the current 4-partition MBR layout:
 - **Phase 1**: Detects rollbacks, prevents boot flapping, blacklists failed workflows
 - **Phase 2**: Checks critical services, filesystems, network, disk space
 - Marks boot successful via `fw_setenv boot_attempts 0`
-- Logs to `/adu/health/boot-validation.log`
+- Logs to `/var/log/adu/boot-validation.log`
+
+**adu-diag:**
+- Comprehensive diagnostic tool for troubleshooting ADU system issues
+- Collects logs, partition info, service status, and configuration
+- Generates diagnostic reports for support analysis
+
+**adu-diskutil:**
+- Interactive USB storage management tool
+- Scan, mount, and unmount USB devices from command line
+- Useful for manual update file transfers
+
+**adu-persistent-overlay:**
+- Hybrid persistence using overlayfs and bind mounts
+- Persists critical data across A/B rootfs updates
+- Alternative to symlinks-based persistence strategy
 
 **adu-swap:**
 - Systemd service that creates 2GB swap file
@@ -471,16 +486,34 @@ If GPT compatibility is uncertain, keep the current 4-partition MBR layout:
 - Installs `/etc/adu-swupdate-hw-compat` for hardware validation
 - Ensures updates are compatible with device model
 
+**adu-tools:**
+- Collection of diagnostic scripts and utilities
+- WiFi diagnostics and other troubleshooting tools
+- Installed to `/adu/tools/` directory
+
 **swupdate:**
 - Custom SWUpdate build with ZSTD compression
 - ADU-specific configurations
 - Delta handler support
 
 ### recipes-azure-device-update
-**ADU Agent and Services**
-- `azure-device-update`: ADU agent service
-- Connects to Azure IoT Hub
-- Manages update downloads, installation, and reporting
+**Raspberry Pi-Specific ADU Customizations**
+
+This directory contains bbappends and recipes that customize the base ADU agent
+(from `meta-azure-device-update`) for Raspberry Pi A/B partition updates:
+
+**adu-config-setup:**
+- Raspberry Pi-specific ADU configuration
+- Sets up `/adu` partition mount and permissions
+
+**azure-device-update (bbappend):**
+- Extends the base ADU agent recipe
+- Adds Raspberry Pi-specific runtime dependencies
+
+**yocto-a-b-update:**
+- Platform-specific A/B update handler script
+- Integrates with U-Boot partition switching
+- Handles rootfs installation to inactive slot
 
 ### wic
 **WIC Image Configuration**
@@ -819,7 +852,7 @@ systemctl enable --now wpa_supplicant@wlan0
 **Debug**:
 ```bash
 # Check boot validation logs
-tail -50 /adu/health/boot-validation.log
+tail -50 /var/log/adu/boot-validation.log
 journalctl -u adu-boot-validation.service -b -1  # Previous boot
 
 # Check failed services
