@@ -1,11 +1,21 @@
 #!/bin/bash
 # Verify overlayfs and bind mounts are active
 
-# Load configuration
-source /adu/conf/overlay.conf 2>/dev/null || {
-    echo "ERROR: Cannot load configuration"
+# Load configuration from multiple locations (fallback chain)
+CONFIG_LOADED=0
+for config_path in "/adu/conf/overlay.conf" "/etc/overlay/overlay.conf" "/etc/adu/overlay.conf"; do
+    if [ -f "${config_path}" ]; then
+        source "${config_path}"
+        CONFIG_LOADED=1
+        break
+    fi
+done
+
+if [ "${CONFIG_LOADED}" -eq 0 ]; then
+    echo "ERROR: Cannot load configuration from any location"
+    echo "  Searched: /adu/conf/overlay.conf, /etc/overlay/overlay.conf, /etc/adu/overlay.conf"
     exit 1
-}
+fi
 
 echo "============================================"
 echo "   ADU Overlay Verification"

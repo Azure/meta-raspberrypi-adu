@@ -30,6 +30,26 @@ mkdir -p "${WORK_BASE}"
 mkdir -p "${SYSTEM_DIR}"
 mkdir -p "${PERSIST_BASE}/.backups"
 
+# CRITICAL: Copy overlay.conf to /adu/conf if not already present
+# This ensures mount-critical-binds.sh and other scripts can find the config
+# even after an A/B update where /etc/adu symlink points to /adu/conf
+PERSIST_CONFIG="${PERSIST_BASE}/conf/overlay.conf"
+if [ ! -f "${PERSIST_CONFIG}" ]; then
+    echo "Copying overlay.conf to persistent storage: ${PERSIST_CONFIG}"
+    mkdir -p "${PERSIST_BASE}/conf"
+    cp "${CONFIG_FILE}" "${PERSIST_CONFIG}"
+    chmod 0644 "${PERSIST_CONFIG}"
+    chown root:adu "${PERSIST_CONFIG}" 2>/dev/null || true
+    echo "✓ overlay.conf copied to ${PERSIST_CONFIG}"
+elif ! cmp -s "${CONFIG_FILE}" "${PERSIST_CONFIG}"; then
+    # Config in rootfs is newer - update persistent copy
+    echo "Updating overlay.conf in persistent storage (rootfs version is newer)"
+    cp "${CONFIG_FILE}" "${PERSIST_CONFIG}"
+    chmod 0644 "${PERSIST_CONFIG}"
+    chown root:adu "${PERSIST_CONFIG}" 2>/dev/null || true
+    echo "✓ overlay.conf updated in ${PERSIST_CONFIG}"
+fi
+
 # NOTE: /adu/data directory structure is created by adu-filesystem-layout service
 # This service (adu-persistent-overlay) runs after adu-filesystem-layout
 # We just verify the directories exist and fix ownership if needed
@@ -136,29 +156,20 @@ if [ -n "${BIND_MOUNTS}" ]; then
                 fi
             fi
         else
-            # File exists - check if we should update from rootfs (e.g., password changed in image)
-            # For authentication files, update if rootfs version is different and not default
+            # File exists in persistent storage - preserve user changes
+            # We do NOT overwrite persistent passwd/shadow files with rootfs versions
+            # because user may have changed passwords or added users.
+            #
+            # IMPORTANT: If you need to reset passwords via an A/B update image,
+            # either:
+            #   1. Delete /adu/system/passwd and /adu/system/shadow before update
+            #   2. Use factory-reset.sh before deploying the new image
+            #   3. Add a version marker file that triggers reset
+            #
+            # This ensures user password changes persist across A/B updates.
             case "$(basename ${target})" in
-                shadow|passwd)
-                    if [ -f "${target}" ] && [ -f "${source_path}" ]; then
-                        # Compare with rootfs version - if different, it may be an intentional update
-                        if ! cmp -s "${target}" "${source_path}" 2>/dev/null; then
-                            # Check if rootfs shadow has non-empty password for root
-                            if [ "$(basename ${target})" = "shadow" ]; then
-                                root_hash=$(grep "^root:" "${target}" | cut -d: -f2)
-                                if [ -n "$root_hash" ] && [ "$root_hash" != "*" ] && [ "$root_hash" != "!" ]; then
-                                    echo "Updating ${source_path} from rootfs (password changed in image)"
-                                    cp -a "${target}" "${source_path}"
-                                    chmod 640 "${source_path}"
-                                    chown root:shadow "${source_path}" 2>/dev/null || chown root:root "${source_path}"
-                                fi
-                            fi
-                        fi
-                    fi
-                    ;;
-            esac
-        fi
-    done
+                shadow|passwd|group|gshadow)
+                    echo "  Preserving existing persistent ${target} (user changes persist)"
 fi
 
 # Run migration if enabled and not yet completed

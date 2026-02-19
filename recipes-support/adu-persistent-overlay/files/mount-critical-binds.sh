@@ -4,9 +4,23 @@
 # Don't use set -e - we want to attempt all mounts even if some fail
 set +e
 
-# Load configuration
-# Use direct path to avoid dependency on /etc/adu symlink creation
-source /adu/conf/overlay.conf
+# Load configuration from multiple locations (fallback chain)
+# Priority: /adu/conf (persistent) → /etc/overlay (rootfs) → /etc/adu (symlink)
+CONFIG_LOADED=0
+for config_path in "/adu/conf/overlay.conf" "/etc/overlay/overlay.conf" "/etc/adu/overlay.conf"; do
+    if [ -f "${config_path}" ]; then
+        echo "Loading configuration from: ${config_path}"
+        source "${config_path}"
+        CONFIG_LOADED=1
+        break
+    fi
+done
+
+if [ "${CONFIG_LOADED}" -eq 0 ]; then
+    echo "ERROR: Cannot find overlay.conf in any location"
+    echo "  Searched: /adu/conf/overlay.conf, /etc/overlay/overlay.conf, /etc/adu/overlay.conf"
+    exit 1
+fi
 
 echo "=== Mounting ADU Critical Bind Mounts ==="
 
