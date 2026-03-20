@@ -1,7 +1,7 @@
 # meta-raspberrypi-adu
 
 > **DISCLAIMER:**  
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ---
 
@@ -9,576 +9,32 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 This is a **Yocto meta layer** that provides Raspberry Pi-specific customizations for Azure Device Update with A/B partition support. It is **not a standalone project** — it must be used as part of a complete Yocto build environment with all required layers.
 
-### What This Layer Provides
-
-- Raspberry Pi BSP customizations for A/B rootfs updates
-- U-Boot boot script with partition switching and rollback logic
-- Boot validation service with health checks
-- WIC partition layout (boot + rootA + rootB + adu)
-- SWUpdate integration for OTA updates
-
-### Layer Dependencies
-
-This layer requires the following layers in your `bblayers.conf`:
-
-| Layer | Purpose | Source |
-|-------|---------|--------|
-| **poky/meta** | Yocto core | https://git.yoctoproject.org/poky |
-| **poky/meta-poky** | Poky distro | (included with poky) |
-| **meta-openembedded/meta-oe** | Additional recipes | https://github.com/openembedded/meta-openembedded |
-| **meta-openembedded/meta-python** | Python support | (included with meta-openembedded) |
-| **meta-openembedded/meta-networking** | Networking tools | (included with meta-openembedded) |
-| **meta-raspberrypi** | Raspberry Pi BSP | https://github.com/agherzan/meta-raspberrypi |
-| **meta-swupdate** | SWUpdate framework | https://github.com/sbabic/meta-swupdate |
-| **meta-clang** | Clang compiler (for delta) | https://github.com/kraj/meta-clang |
-| **meta-azure-device-update** | ADU agent & handlers | https://github.com/azure/meta-azure-device-update|
-| **meta-iot-hub-device-update-delta** | Delta update support | http://github.com/azure/meta-iot-hub-device-update-delta |
-| **meta-raspberrypi-adu** | **This layer** | (this project) |
-
-### Integration Example
-
-For a complete working example of how to integrate all these layers, see the parent repository's build scripts and `bblayers.conf` configuration.
-
 ```bash
 # Typical build workflow (from parent iot-hub-device-update-yocto repo)
 cd iot-hub-device-update-yocto
 source yocto/poky/oe-init-build-env ~/adu_yocto/out/build
 
-# Ensure all layers are in bblayers.conf, then:
+# Ensure all layers are in bblayers.conf, then build:
 bitbake adu-base-image
 
-# Flash to SD card
+# Flash to SD card using bmaptool (recommended — faster, verifies integrity)
 cd ~/adu_yocto/out/build/tmp/deploy/images/raspberrypi4-64/
 sudo bmaptool copy adu-base-image-raspberrypi4-64.wic.gz /dev/sdX
-```
 
-**Prerequisites**: Ubuntu 20.04+, 100GB disk space, 16GB RAM (recommended), 16GB+ SD card
+# Alternative: flash with dd
+# sudo dd if=adu-base-image-raspberrypi4-64.wic of=/dev/sdX bs=4M status=progress && sync
+```
 
 ---
 
-## Overview
-
-This Yocto meta layer provides a complete, **production-ready reference implementation** of Azure Device Update (ADU) for Raspberry Pi devices (3B+ and 4) with advanced delta update capabilities and resilient A/B partition management.
-
-**For platform-agnostic design concepts**, see: [ADU A/B Update Architecture Guide](docs/architecture.md)
-
-## Purpose
-
-The `meta-raspberrypi-adu` layer enables:
-
-1. **Over-the-Air (OTA) Updates via Azure Device Update**
-   - Full integration with Azure IoT Hub Device Update service
-   - Support for full image updates and bandwidth-efficient delta updates
-   - Automated update deployment and monitoring from Azure cloud
-
-2. **Resilient A/B Partition Updates**
-   - Dual rootfs partitions (rootA/rootB) with automatic failover
-   - Boot health validation with automatic rollback on failure
-   - U-Boot integration with boot attempt counter (max 3 attempts)
-   - Minimal downtime (single reboot for partition switch, automatic rollback on failure)
-
-3. **Delta Update Infrastructure**
-   - Large dedicated partition (8GB) for delta staging and reconstruction
-   - Automatic 2GB swap file for memory-constrained delta operations
-   - Microsoft's libadudiffapi for efficient binary patching
-   - Reduces bandwidth usage by 60-95% compared to full updates
-
-4. **Production Security and Reliability**
-   - ACL-protected ADU data partition (adu group access only)
-   - Boot health monitoring with comprehensive system checks
-   - Persistent health logs in `/adu/health/` directory
-   - Hardware compatibility validation via swupdate
-
-## Key Features
-
-### Azure Device Update Agent
-- **SWUpdate Handler V2**: Full rootfs updates with partition management
-- **Delta Downloader**: Bandwidth-efficient differential updates
-- **Script Handler**: Custom update workflows and pre/post-install hooks
-- **Delivery Optimization**: Intelligent download scheduling and caching
-
-### A/B Update System
-- **Dual Rootfs Partitions**: Independent root filesystems for failsafe updates
-- **U-Boot A/B Switching**: Automatic boot slot selection and rollback
-- **Boot Health Validation**: Post-update system health checks
-- **Automatic Rollback**: Reverts to previous partition after 3 failed boot attempts
-
-### Delta Update Support
-- **8GB ADU Partition**: Large staging area for delta reconstruction (ext4)
-- **2GB Swap File**: Automatic swap creation for memory-intensive patching
-- **Binary Differential Updates**: 5-40% of full image size (typical)
-- **Integrity Verification**: SHA256 checksums for all update files
-
-### Custom SWUpdate
-- **ZSTD Compression**: Fast decompression for quicker updates
-- **Hardware Compatibility**: Custom compatibility file (`/etc/adu-swupdate-hw-compat`)
-- **Update Handlers**: Support for multiple update types (image, file, script)
-
-### Boot Health System
-- **Post-Boot Validation**: Validates critical services, filesystems, and network
-- **Success Marking**: Resets boot counter via `fw_setenv boot_attempts 0`
-- **Health Logging**: Detailed logs in `/var/log/adu/boot-validation.log`
-- **Failure Detection**: Triggers automatic rollback on validation failure
-
-### Security and Access Control
-- **ADU User/Group**: Dedicated user (uid=800) and group (gid=800)
-- **Protected Health Data**: `/adu/health/` accessible only by adu group and root
-- **Secure Partition Mounting**: `/adu` mounted with restrictive permissions (770)
-
-## Partition Layout
-
-The layer creates a 5-partition layout optimized for A/B updates, delta operations, and customer data:
-
-| Partition | Size | Type | Mount | Purpose | A/B |
-|-----------|------|------|-------|---------|-----|
-| P1: boot | 2GB | FAT32 | /boot | U-Boot, kernel, device tree | ❌ Shared |
-| P2: rootA | Dynamic+512MB | ext4 | / | Root filesystem - Slot A | ✅ |
-| P3: rootB | Dynamic+512MB | ext4 | / | Root filesystem - Slot B | ✅ |
-| P4: adu | 8GB | ext4 | /adu | ADU data, logs, swap, delta staging | ❌ Shared |
-| P5: data | 1GB | FAT32 | /data | **Optional**: Customer data storage | ❌ Shared |
-
-**Why 8GB for /adu?**
-- Delta reconstruction requires ~2GB staging space (rootfs size)
-- 2GB swap file for memory-constrained delta operations
-- Room for logs, health data, and download cache
-- Future expansion headroom
-
-**Optional /data partition:**
-- Persists across updates for application-specific data
-- FAT32 for easy cross-platform access (Linux/Windows)
-- Can be used for logs, configuration, user data, etc.
-- Not required for ADU functionality
-
-## Adding or Modifying Partitions
-
-### Overview
-
-The partition layout is defined in two synchronized files that MUST be kept in sync:
-
-1. **WIC Kickstart File**: `wic/adu-raspberrypi.wks` - Defines physical partition layout
-2. **Filesystem Table**: `recipes-core/base-files/base-files/raspberrypi4-64/fstab` - Defines mount points
-
-**CRITICAL**: These files must match exactly, or the system will fail to boot.
-
-### Adding a New Partition
-
-To add a new partition (like `/data`), follow these steps:
-
-#### Step 1: Add Partition to WIC File
-
-Edit `wic/adu-raspberrypi.wks`:
-
-```wks
-# Add your new partition at the end
-part /mynewpart --ondisk mmcblk0 --fstype=ext4 --label mynewpart --align 4096 --size 2048
-```
-
-**Key parameters:**
-- `/mynewpart` - Mount point (optional, can be omitted for unmounted partitions)
-- `--fstype` - Filesystem type (`ext4`, `vfat`, `ext3`, etc.)
-- `--label` - Partition label for identification
-- `--size` - Size in MB
-- `--align 4096` - Align to 4KB boundaries (recommended for SD cards)
-
-#### Step 2: Add Mount Entry to fstab
-
-Edit `recipes-core/base-files/base-files/raspberrypi4-64/fstab`:
-
-```bash
-# Mount the new partition
-# Device number follows partition order in .wks file
-/dev/mmcblk0p6  /mynewpart   ext4    defaults,nofail   0   2
-```
-
-**Device numbering:**
-- P1 = /boot (first partition in .wks)
-- P2 = rootA (second partition)
-- P3 = rootB (third partition)
-- P4 = /adu (fourth partition)
-- P5 = /data (fifth partition)
-- P6 = /mynewpart (sixth partition - your new one)
-
-**Mount options:**
-- `defaults` - Standard options (rw, suid, dev, exec, auto, nouser, async)
-- `nofail` - **CRITICAL**: System continues booting even if mount fails
-- `0` - Dump frequency (0 = don't dump)
-- `2` - fsck pass (0=skip, 1=root, 2=other filesystems)
-
-#### Step 3: Create Mount Point Directory
-
-The mount point directory must exist in the rootfs. Add it to `recipes-core/base-files/base-files_%.bbappend`:
-
-```bash
-do_install:append() {
-    # ... existing code ...
-    
-    # Create mount point for new partition
-    install -d ${D}/mynewpart
-}
-```
-
-**Why is this needed?**
-- Unlike `/adu` (created by `azure-device-update` recipe), new partitions don't have automatic directory creation
-- Without the directory, systemd will fail to mount the partition
-- The `nofail` option prevents boot failure, but the partition won't be mounted
-
-#### Step 4: Rebuild Image
-
-Clean and rebuild to apply partition changes:
-
-```bash
-cd ~/adu_yocto/iot-hub-device-update-yocto
-./scripts/build.sh -o ~/adu_yocto/out/build --rebuild-base-image
-```
-
-### Removing a Partition
-
-To remove a partition:
-
-1. **Remove from WIC file**: Delete or comment out the `part` line
-2. **Remove from fstab**: Delete or comment out the mount entry
-3. **Remove mount point creation**: Remove `install -d ${D}/partition` from bbappend
-4. **Rebuild**: Use `--rebuild-base-image` to apply changes
-
-**WARNING**: Removing partitions changes device numbering for subsequent partitions!
-
-### Key Differences: /adu vs /data Partitions
-
-| Aspect | /adu Partition | /data Partition |
-|--------|----------------|-----------------|
-| **Created by** | `azure-device-update` recipe | `base-files` recipe |
-| **Directory creation** | Automatic (ADUC_CONF_DIR=/adu) | Manual (base-files_%.bbappend) |
-| **Filesystem** | ext4 (ACL support, journaling) | vfat (cross-platform compatibility) |
-| **Size** | 4GB-8GB (for delta staging) | Variable (1GB default) |
-| **Ownership** | adu:adu (800:800) | root:root |
-| **Permissions** | 0770 (restricted to adu group) | 0755 (world-readable) |
-| **Purpose** | ADU system data, logs, swap | Customer application data |
-| **Required** | ✅ YES (ADU won't function) | ❌ NO (optional) |
-| **Mount options** | `defaults` | `defaults,nofail` |
-| **Post-mount setup** | `adu-setup.service` (chown/chmod) | None |
-
-### Troubleshooting Partition Issues
-
-#### Boot Failure After Adding Partition
-
-**Symptom**: System fails to boot or hangs during startup
-
-**Causes:**
-1. Mount point directory doesn't exist
-2. Missing `nofail` option in fstab
-3. WIC and fstab partition numbers don't match
-
-**Solution:**
-```bash
-# Add nofail to fstab entry
-/dev/mmcblk0pX  /mountpoint   ext4    defaults,nofail   0   2
-
-# Ensure directory is created in base-files_%.bbappend
-install -d ${D}/mountpoint
-```
-
-#### Partition Not Mounting
-
-**Symptom**: Partition exists but isn't mounted after boot
-
-**Check:**
-```bash
-# On device, check if partition exists
-lsblk
-fdisk -l /dev/mmcblk0
-
-# Check fstab syntax
-cat /etc/fstab
-
-# Check systemd mount unit
-systemctl status mountpoint.mount
-
-# Check system logs
-journalctl -xe | grep mount
-```
-
-**Common issues:**
-- Wrong device number (`/dev/mmcblk0p5` vs `/dev/mmcblk0p6`)
-- Typo in fstab mount point vs directory name
-- Missing `nofail` causes boot hang
-- Filesystem not formatted (WIC handles this, but check if manual partitioning)
-
-#### UID/GID Synchronization Issues
-
-**Symptom**: Permission denied when accessing /adu partition
-
-**Cause**: UID/GID 800:800 defined in multiple places must stay synchronized
-
-**Files to check:**
-1. `meta-azure-device-update/recipes-azure-device-update/azure-device-update/azure-device-update_git.bb`
-   ```bash
-   GROUPADD_PARAM:${PN} = "--gid 800 --system adu"
-   USERADD_PARAM:${PN} = "--uid 800 --system -g adu ..."
-   ```
-
-2. `meta-raspberrypi-adu/recipes-core/base-files/base-files/adu-setup.service`
-   ```bash
-   ExecStart=/bin/chown 800:800 /adu
-   ```
-
-3. `meta-raspberrypi-adu/wic/adu-raspberrypi.wks` (if using vfat)
-   ```wks
-   part /adu --fstype=vfat --fsoptions "umask=0027,gid=800,uid=800"
-   ```
-
-**If you change UID/GID**, update ALL these files to match.
-
-### MBR vs GPT Partition Tables
-
-**CRITICAL**: The current configuration uses **MBR (Master Boot Record)** partition table, which has a **hard limit of 4 primary partitions**.
-
-#### Current Partition Count: 4/4 (At MBR Limit)
-
-```
-P1: /boot  (2GB vfat)    - Primary
-P2: rootA  (~2GB ext4)   - Primary  
-P3: rootB  (~2GB ext4)   - Primary
-P4: /adu   (8GB ext4)    - Primary
----
-Total: 4 partitions (MBR maximum reached)
-```
-
-#### Adding a 5th Partition Requires GPT
-
-If you need more than 4 partitions (e.g., to add `/data`), you **must** switch to **GPT (GUID Partition Table)**:
-
-**What is GPT?**
-- Modern partition table standard (vs legacy MBR)
-- Supports up to 128 partitions
-- Required for disks >2TB
-- More reliable (redundant headers, CRC32 checksums)
-- Better support for modern UEFI systems
-
-**How to Enable GPT:**
-
-1. Add to top of `wic/adu-raspberrypi.wks` (after comments):
-   ```wks
-   # Use GPT partition table to support >4 partitions
-   bootloader --ptable gpt
-   ```
-
-2. Uncomment the 5th partition in `.wks` file:
-   ```wks
-   part /data --ondisk mmcblk0 --fstype=vfat --label data --align 4096 --size 1024
-   ```
-
-3. Uncomment the mount entry in `fstab`:
-   ```bash
-   /dev/mmcblk0p5  /data   vfat    defaults,nofail   0   0
-   ```
-
-4. Create `/data` directory in `base-files_%.bbappend`
-
-5. **Test thoroughly on target hardware**
-
-**⚠️ WARNINGS:**
-
-1. **Raspberry Pi firmware compatibility**: 
-   - Raspberry Pi 4: Should work (EEPROM supports GPT)
-   - Raspberry Pi 3B+: May have limited/no GPT boot support
-   - Older models: Likely won't boot from GPT
-   
-2. **Testing required**:
-   - Test on non-production hardware first
-   - Verify U-Boot can read GPT partition table
-   - Check that firmware loads bootloader correctly
-   - Ensure all partitions mount correctly
-
-3. **Compatibility concerns**:
-   - Some older boot ROMs only support MBR
-   - Recovery tools may not recognize GPT
-   - Dual-boot scenarios more complex
-
-**Alternative: Stick with 4 Partitions**
-
-If GPT compatibility is uncertain, keep the current 4-partition MBR layout:
-- Use `/adu` for both system and application data
-- Create subdirectories: `/adu/system`, `/adu/app-data`
-- Adjust size of `/adu` partition as needed
-- This is the **recommended approach** for maximum compatibility
-
-### Best Practices
-
-1. **Stay within 4 partitions for MBR compatibility** (recommended for Raspberry Pi)
-2. **Always use `nofail`** for optional partitions to prevent boot failures
-3. **Keep WIC and fstab synchronized** - partition numbers must match
-4. **Test boot on hardware** after partition changes
-5. **Document partition purpose** in comments (both WIC and fstab)
-6. **Use ext4 for system partitions** (ACL support, journaling, reliability)
-7. **Use vfat for data partitions** (cross-platform compatibility)
-8. **Align partitions to 4096 bytes** for optimal SD card performance
-9. **Leave room for growth** - don't use 100% of SD card space
-10. **Test GPT thoroughly** before production use - not all Pi models support it
-
-## Recipe Structure
-
-### recipes-bsp
-**U-Boot Boot Script Customization**
-- Implements A/B partition switching logic in U-Boot
-- Boot counter management (max 3 attempts per slot)
-- Automatic failover to alternate partition on failure
-- Reads `rpipart` environment variable (2=rootA, 3=rootB)
-
-**Key Files:**
-- [rpi-u-boot-scr/files/boot.cmd.in](recipes-bsp/rpi-u-boot-scr/files/boot.cmd.in): Boot script with A/B logic
-
-### recipes-core
-**Base Image and Filesystem Configuration**
-
-**base-files:**
-- Custom `fstab` with all 4 partitions
-- `/adu` mounted with ACL restrictions (uid=800, gid=800, umask=0027)
-- Automatic mounting on boot
-
-**images:**
-- `adu-base-image.bb`: Base image recipe with all ADU components
-- Includes boot-health and swap services
-- WIC image generation for SD card flashing
-
-### recipes-extended
-**OTA Update Image Creation**
-- `adu-update-image.bb`: SWU package for OTA updates
-- Contains rootfs tarball and update scripts
-- Includes version metadata and signatures
-
-### recipes-graphics
-**Graphics Stack**
-- Mesa, DRM/KMS drivers for Raspberry Pi
-- Optional GUI components
-
-### recipes-support
-**ADU Infrastructure Services**
-
-**adu-boot-validation:**
-- Two-phase systemd service that validates successful boot (runs before ADU agent)
-- **Phase 1**: Detects rollbacks, prevents boot flapping, blacklists failed workflows
-- **Phase 2**: Checks critical services, filesystems, network, disk space
-- Marks boot successful via `fw_setenv boot_attempts 0`
-- Logs to `/var/log/adu/boot-validation.log`
-
-**adu-diag:**
-- Comprehensive diagnostic tool for troubleshooting ADU system issues
-- Collects logs, partition info, service status, and configuration
-- Generates diagnostic reports for support analysis
-
-**adu-diskutil:**
-- Interactive USB storage management tool
-- Scan, mount, and unmount USB devices from command line
-- Useful for manual update file transfers
-
-**adu-persistent-overlay:**
-- Hybrid persistence using overlayfs and bind mounts
-- Persists critical data across A/B rootfs updates
-- Alternative to symlinks-based persistence strategy
-
-**adu-swap:**
-- Systemd service that creates 2GB swap file
-- Located at `/adu/swapfile` on ADU partition
-- Activates automatically on boot
-- Logs to `/adu/health/swap-setup.log`
-
-**adu-swupdate-hw-compat:**
-- Installs `/etc/adu-swupdate-hw-compat` for hardware validation
-- Ensures updates are compatible with device model
-
-**adu-tools:**
-- Collection of diagnostic scripts and utilities
-- WiFi diagnostics and other troubleshooting tools
-- Installed to `/adu/tools/` directory
-
-**swupdate:**
-- Custom SWUpdate build with ZSTD compression
-- ADU-specific configurations
-- Delta handler support
-
-### recipes-azure-device-update
-**Raspberry Pi-Specific ADU Customizations**
-
-This directory contains bbappends and recipes that customize the base ADU agent
-(from `meta-azure-device-update`) for Raspberry Pi A/B partition updates:
-
-**adu-config-setup:**
-- Raspberry Pi-specific ADU configuration
-- Sets up `/adu` partition mount and permissions
-
-**azure-device-update (bbappend):**
-- Extends the base ADU agent recipe
-- Adds Raspberry Pi-specific runtime dependencies
-
-**yocto-a-b-update:**
-- Platform-specific A/B update handler script
-- Integrates with U-Boot partition switching
-- Handles rootfs installation to inactive slot
-
-### wic
-**WIC Image Configuration**
-- `adu-raspberrypi.wks`: Partition layout definition
-- Creates bootable SD card image with 4 partitions
-- Generates `.wic.gz` and `.wic.bmap` for flashing
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        SD Card Layout                            │
-├─────────────┬─────────────┬─────────────┬───────────┬───────────┤
-│ Boot (2G)   │ RootA (2G)  │ RootB (2G)  │ ADU (8G)  │ Data (1G) │
-│   (FAT32)   │   (ext4)    │   (ext4)    │  (ext4)   │  (FAT32)  │
-└─────────────┴─────────────┴─────────────┴───────────┴───────────┘
-       │              │             │            │           │
-       │              │             │            │           └─ Customer data
-       │              │             │            │              (optional)
-       │              │             │            │
-       │              │             │            └─ Delta staging
-       │              │             │               Swap file (2GB)
-       │              │             │               Health logs
-       │              │             │               Download cache
-       │              │             │
-       │              │             └─ Inactive slot (update target)
-       │              │
-       │              └─ Active slot (current boot)
-       │
-       └─ U-Boot + Kernel (shared)
-
-Update Flow:
-1. Device boots from RootA (rpipart=2)
-2. Boot-health service validates system health
-3. ADU downloads delta update to /adu/
-4. Delta reconstructed using v1 + diff → v2
-5. SWUpdate installs v2 to RootB
-6. U-Boot switches to RootB (rpipart=3)
-7. Device reboots into RootB
-8. Boot-health validates → success or rollback
-```
-
-## Build Artifacts
-
-The layer produces:
-
-- **SD Card Image**: `adu-base-image-raspberrypi4-64.wic.gz` (for initial flashing)
-- **OTA Update Package**: `adu-update-image-raspberrypi4-64.swu` (for cloud deployment)
-- **Delta Files**: `.diff` files for bandwidth-efficient updates
-- **Import Manifests**: JSON files for Azure Device Update import
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| ⭐ **[Customization Guide](docs/customization.md)** | **Start here** — All A/B update customizations: partitioning, U-Boot boot script, boot validation, ADU handler integration |
-| [Architecture Guide](docs/architecture.md) | Platform-agnostic A/B rootfs design patterns, storage/RAM requirements |
-| [Porting Guide](docs/porting.md) | Adapt this layer to other hardware platforms |
-| [U-Boot Script](docs/uboot.md) | A/B partition boot logic, variables, rollback |
-| [Troubleshooting](docs/troubleshooting.md) | Common issues and fixes for boot, updates, builds |
-
-### External Resources
-- [Azure Device Update Documentation](https://learn.microsoft.com/azure/iot-hub-device-update/)
-- [SWUpdate Documentation](https://sbabic.github.io/swupdate/)
-- [U-Boot Documentation](https://u-boot.readthedocs.io/)
+## What This Layer Provides
+
+- Raspberry Pi BSP customizations for A/B rootfs updates
+- U-Boot boot script with partition switching and automatic rollback logic
+- Boot validation service with configurable health checks
+- WIC partition layout (boot + rootA + rootB + adu)
+- SWUpdate integration for OTA updates
+- Persistent overlay strategy to preserve data across A/B updates
 
 ---
 
@@ -609,76 +65,424 @@ The layer produces:
 
 ---
 
-## Quick Start
+## Layer Dependencies
 
-```bash
-# Clone and initialize
-cd iot-hub-device-update-yocto
-source yocto/poky/oe-init-build-env ~/adu_yocto/out/build
+This layer requires the following layers in your `bblayers.conf`:
 
-# Build base image
-bitbake adu-base-image
+| Layer | Purpose | Source |
+|-------|---------|--------|
+| **poky/meta** | Yocto core | https://git.yoctoproject.org/poky |
+| **poky/meta-poky** | Poky distro | (included with poky) |
+| **meta-openembedded/meta-oe** | Additional recipes | https://github.com/openembedded/meta-openembedded |
+| **meta-openembedded/meta-python** | Python support | (included with meta-openembedded) |
+| **meta-openembedded/meta-networking** | Networking tools | (included with meta-openembedded) |
+| **meta-raspberrypi** | Raspberry Pi BSP | https://github.com/agherzan/meta-raspberrypi |
+| **meta-swupdate** | SWUpdate framework | https://github.com/sbabic/meta-swupdate |
+| **meta-clang** | Clang compiler (for delta) | https://github.com/kraj/meta-clang |
+| **meta-azure-device-update** | ADU agent & handlers | https://github.com/azure/meta-azure-device-update |
+| **meta-iot-hub-device-update-delta** | Delta update support | https://github.com/azure/meta-iot-hub-device-update-delta |
+| **meta-raspberrypi-adu** | **This layer** | (this project) |
 
-# Flash to SD card
-cd ~/adu_yocto/out/build/tmp/deploy/images/raspberrypi4-64/
-sudo dd if=adu-base-image-raspberrypi4-64.wic of=/dev/sdX bs=4M status=progress
-sync
+For a complete working example of how to integrate all these layers, see the parent repository's build scripts and `bblayers.conf` configuration.
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| ⭐ **[Customization Guide](docs/customization.md)** | **Start here for modifications** — Partitioning, U-Boot boot script, boot validation, ADU handler integration |
+| [Architecture Guide](docs/architecture.md) | Platform-agnostic A/B rootfs design patterns, storage/RAM requirements |
+| [Porting Guide](docs/porting.md) | Adapt this layer to other hardware platforms |
+| [U-Boot Script](docs/uboot.md) | A/B partition boot logic, variables, rollback |
+| [Troubleshooting](docs/troubleshooting.md) | Common issues and fixes for boot, updates, builds |
+
+### External Resources
+- [Azure Device Update Documentation](https://learn.microsoft.com/azure/iot-hub-device-update/)
+- [SWUpdate Documentation](https://sbabic.github.io/swupdate/)
+- [U-Boot Documentation](https://u-boot.readthedocs.io/)
+
+---
+
+## Overview
+
+This Yocto meta layer provides a complete, **production-ready reference implementation** of Azure Device Update (ADU) for Raspberry Pi devices (3B+ and 4) with advanced delta update capabilities and resilient A/B partition management.
+
+**For platform-agnostic design concepts**, see: [ADU A/B Update Architecture Guide](docs/architecture.md)
+
+## Purpose
+
+The `meta-raspberrypi-adu` layer enables:
+
+1. **Over-the-Air (OTA) Updates via Azure Device Update**
+   - Full integration with Azure IoT Hub Device Update service
+   - Support for full image updates and bandwidth-efficient delta updates
+   - Automated update deployment and monitoring from Azure cloud
+
+2. **Resilient A/B Partition Updates**
+   - Dual rootfs partitions (rootA/rootB) with automatic failover
+   - Boot health validation with automatic rollback on failure
+   - U-Boot integration with configurable boot attempt counter (default: 5 attempts)
+   - Minimal downtime (single reboot for partition switch, automatic rollback on failure)
+
+3. **Delta Update Infrastructure**
+   - Large dedicated partition (8GB) for delta staging and reconstruction
+   - Automatic 2GB swap file for memory-constrained delta operations
+   - Microsoft's libadudiffapi for efficient binary patching
+   - Reduces bandwidth usage by 60-95% compared to full updates
+
+4. **Production Security and Reliability**
+   - ACL-protected ADU data partition (`adu` group access only, set by `adu-setup.service`)
+   - Boot health monitoring with comprehensive system checks
+   - Persistent health logs in `/var/log/adu/`
+   - Hardware compatibility validation via swupdate
+
+## Key Features
+
+### Azure Device Update Agent
+- **SWUpdate Handler V2**: Full rootfs updates with partition management
+- **Delta Downloader**: Bandwidth-efficient differential updates
+- **Script Handler**: Custom update workflows and pre/post-install hooks
+- **Delivery Optimization**: Intelligent download scheduling and caching
+
+### A/B Update System
+- **Dual Rootfs Partitions**: Independent root filesystems for failsafe updates
+- **U-Boot A/B Switching**: Automatic boot slot selection via `boot_partition` variable (`rootA`/`rootB`)
+- **Boot Health Validation**: Post-update system health checks
+- **Automatic Rollback**: Reverts to previous partition after `max_boot_attempts` failed attempts (default: 5)
+
+### Delta Update Support
+- **8GB ADU Partition**: Large staging area for delta reconstruction (ext4)
+- **2GB Swap File**: Automatic swap creation for memory-intensive patching
+- **Binary Differential Updates**: 5-40% of full image size (typical)
+- **Integrity Verification**: SHA256 checksums for all update files
+
+### Custom SWUpdate
+- **ZSTD Compression**: Fast decompression for quicker updates
+- **Hardware Compatibility**: Custom compatibility file (`/etc/adu-swupdate-hw-compat`)
+- **Update Handlers**: Support for multiple update types (image, file, script)
+
+### Boot Health System
+- **Post-Boot Validation**: Validates critical services, filesystems, and network
+- **Success Marking**: Resets boot counter via `fw_setenv boot_attempts 0`
+- **Health Logging**: Detailed logs in `/var/log/adu/boot-validation.log`
+- **Failure Detection**: Triggers automatic rollback on validation failure
+
+### Security and Access Control
+- **ADU User/Group**: Dedicated user (uid=800) and group (gid=800)
+- **Protected Partition**: `/adu` ownership set to `adu:adu` (770) by `adu-setup.service` after mount
+- **Persistent Configuration**: `/etc/adu → /adu/conf` and `/var/log/adu → /adu/logs` symlinks
+
+---
+
+## Partition Layout
+
+The layer creates a 4-partition layout (MBR) optimized for A/B updates and delta operations:
+
+| Partition | Size | Type | Mount | Purpose | A/B |
+|-----------|------|------|-------|---------|-----|
+| P1: boot | 2GB | FAT32 | /boot | U-Boot, kernel, device tree | ❌ Shared |
+| P2: rootA | Dynamic+512MB | ext4 | / | Root filesystem — Slot A | ✅ |
+| P3: rootB | Dynamic+512MB | ext4 | / | Root filesystem — Slot B | ✅ |
+| P4: adu | 8GB | ext4 | /adu | ADU data, logs, swap, delta staging | ❌ Shared |
+
+> **Note on a 5th `/data` partition**: The WIC file contains a commented-out 5th partition for optional customer data storage. Enabling it requires switching to a GPT partition table (MBR supports only 4 primary partitions). Raspberry Pi 4 supports GPT; older models may not. See the [Customization Guide](docs/customization.md) for instructions.
+
+**Why 8GB for /adu?**
+- Delta reconstruction requires ~2GB staging space (rootfs size)
+- 2GB swap file for memory-constrained delta operations
+- Room for logs, health data, and download cache
+- Future expansion headroom
+
+**Partition management** (adding/removing partitions, MBR vs GPT migration, fstab sync): see [Customization Guide](docs/customization.md).
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        SD Card Layout                            │
+├─────────────┬─────────────┬─────────────┬───────────────────────┤
+│ Boot (2G)   │ RootA (2G)  │ RootB (2G)  │       ADU (8G)        │
+│   (FAT32)   │   (ext4)    │   (ext4)    │       (ext4)          │
+└─────────────┴─────────────┴─────────────┴───────────────────────┘
+       │              │             │            │
+       │              │             │            └─ Delta staging
+       │              │             │               Swap file (2GB)
+       │              │             │               Health logs
+       │              │             │               Download cache
+       │              │             │
+       │              │             └─ Inactive slot (update target)
+       │              │
+       │              └─ Active slot (current boot)
+       │
+       └─ U-Boot + Kernel (shared)
+
+Update Flow:
+1. Device boots from RootA (boot_partition=rootA)
+2. Boot-health service validates system health
+3. ADU downloads delta update to /adu/
+4. Delta reconstructed using v1 + diff → v2
+5. SWUpdate installs v2 to RootB
+6. U-Boot switches to RootB (boot_partition=rootB)
+7. Device reboots into RootB
+8. Boot-health validates → success or rollback
 ```
 
 ---
 
-## Recipes Overview
+## Recipe Reference
 
-### Update Workflow Recipes
+### recipes-bsp
 
-The layer includes versioned update recipes for testing A/B and delta update workflows:
+#### `rpi-u-boot-scr` (bbappend)
+Overrides the default Raspberry Pi U-Boot boot script from `meta-raspberrypi` to implement A/B partition management with automatic rollback.
 
-| Recipe | Version | Output | Purpose |
-|--------|---------|--------|---------|
-| `adu-base-image.bb` | 1.0.0 | `adu-base-image-*.wic.gz` | Initial SD card image (flash once) |
-| `adu-update-image.bb` | 1.0.1 | `adu-update-image-*.swu` | First OTA update package |
-| `adu-update-image-v2.bb` | 2.0.0 | `adu-update-image-v2-*.swu` | Second OTA update package |
-| `adu-update-image-v3.bb` | 3.0.0 | `adu-update-image-v3-*.swu` | Third OTA update package |
-| `adu-delta-image.bb` | - | `*.diff` delta files | Binary diffs between versions |
+**How it works:**
+- Reads the `boot_partition` U-Boot environment variable (`rootA` or `rootB`)
+- Increments `boot_attempts` on each boot
+- If `boot_attempts` exceeds `max_boot_attempts` (default: **5**), triggers rollback to `last_known_good_partition`
+- On first boot, initialises all variables and saves `uboot.env`
 
-**Demo Update Path**:
+**Key U-Boot environment variables:**
+
+| Variable | Values | Description |
+|----------|--------|-------------|
+| `boot_partition` | `rootA` / `rootB` | Active partition to boot |
+| `boot_attempts` | 0–N | Current boot attempt counter for active slot |
+| `max_boot_attempts` | 5 (default) | Rollback threshold (configurable) |
+| `upgrade_available` | `0` / `1` | Indicates a pending update awaiting validation |
+| `boot_result` | `success` / `failed` / `unknown` | Result of last boot validation |
+| `last_known_good_partition` | `rootA` / `rootB` | Safe fallback partition |
+
+**Key files:**
+- [`rpi-u-boot-scr/files/boot.cmd.in`](recipes-bsp/rpi-u-boot-scr/files/boot.cmd.in): Boot script with A/B logic
+- [`rpi-u-boot-scr/files/check-uboot-rollback.sh`](recipes-bsp/rpi-u-boot-scr/files/check-uboot-rollback.sh): Userspace helper to inspect rollback state
+
+#### `u-boot` (bbappend) + `fw-env-conf`
+- `u-boot_%.bbappend`: Applies build patches for Raspberry Pi compatibility
+- `fw-env-conf.bb`: Installs `/etc/fw_env.config` so `fw_printenv` / `fw_setenv` know where the U-Boot environment is stored
+
+---
+
+### recipes-core
+
+#### `base-files` (bbappend)
+- Custom `fstab` with all 4 partitions defined (`/boot`, `/`, `/adu`)
+- `/adu` is mounted with `defaults` options; ownership (`800:800`) and permissions (`770`) are applied **post-mount** by `adu-setup.service`
+- Installs `adu-setup.service` to set `/adu` ownership after mount
+
+  > **Note**: `adu-setup.service` is deprecated and will be superseded by `adu-oobe.service` from `meta-azure-device-update` in a future release. Both handle `/adu` partition ownership setup.
+
+#### `images/adu-base-image.bb`
+Base image recipe with all ADU components. Produces:
+- `adu-base-image-raspberrypi4-64.wic.gz` — SD card flash image
+- `adu-base-image-raspberrypi4-64.ext4.gz` — rootfs used by OTA update packages
+
+Sets `ADU_SOFTWARE_VERSION` (default: `0.0.1.0`) written to `/etc/adu-version`.
+
+#### `packagegroup-base.bbappend`
+Extends the base package group with additional Raspberry Pi-specific packages.
+
+---
+
+### recipes-extended
+
+#### `adu-update-image.bb`
+Builds a SWUpdate `.swu` OTA update package from `adu-base-image`. The package contains the compressed ext4 rootfs and an `sw-description` manifest targeting both rootA and rootB.
+
+Signing is configured via:
+- `ADUC_PRIVATE_KEY` — path to RSA private key (`.pem`)
+- `ADUC_PRIVATE_KEY_PASSWORD` — path to key password file (`.pass`)
+
+**Versioned update recipes and delta recipes** (`adu-update-image-v2`, `adu-update-image-v3`, `adu-delta-image`) are **not part of this layer**. They live in the sibling [`meta-azure-device-update-samples`](../meta-azure-device-update-samples/) layer, which provides the full multi-version A/B and delta update demo workflow.
+
+---
+
+### recipes-graphics
+
+#### `mesa`, `mesa-gl`, `mesa-demos` (bbappends)
+Mesa and DRM/KMS configuration for the Raspberry Pi graphics stack. These bbappends adjust build options for compatibility with the RPi BSP.
+
+---
+
+### recipes-kernel
+
+#### `linux-raspberrypi_%.bbappend`
+Applies a kernel config fragment (`enable-overlayfs.cfg`) that enables overlayfs support (`CONFIG_OVERLAY_FS=y`). This is a **required** kernel dependency for `adu-persistent-overlay` to function.
+
+---
+
+### recipes-support
+
+#### `adu-boot-validation`
+Unified two-phase systemd service that validates each boot **before** the ADU agent starts.
+
+- **Phase 1 — Rollback detection**: Reads U-Boot variables to detect if an auto-rollback occurred. If so, blacklists the failed `workflow_id` to prevent infinite retry loops and detects partition flapping.
+- **Phase 2 — Health validation**: Runs configurable health checks (critical services, filesystems, network, disk space). Supports custom plugin scripts in `/usr/lib/adu/validation-checks.d/`.
+- On success: calls `fw_setenv boot_attempts 0` to mark the boot good.
+- Logs to `/var/log/adu/boot-validation.log`.
+
+**Installed tools:**
+- `adu-boot-validation.sh` (`/usr/bin/`) — validation script (also callable manually)
+- `adu-confirm-boot` (`/usr/bin/`) — operator tool to manually confirm a boot as healthy (useful when automated checks are too strict during development)
+- `boot-validation.conf` (`/usr/lib/adu/`) — configuration for check behaviour
+- `check-example.sh.disabled` — example custom check plugin (disabled by default)
+
+#### `adu-diag`
+Comprehensive diagnostic tool for troubleshooting ADU system issues.
+
+**Installed tools:**
+- `adu-diag` (`/usr/bin/`) — collects logs, partition info, service status, and configuration into a support bundle
+- `adu-health-check` (`/usr/bin/`) — runs all health checks without early exit (useful for scripted validation or CI); unlike `adu-boot-validation.sh`, it never triggers rollback
+
+#### `adu-diskutil`
+Interactive USB storage management tool (`/usr/bin/adu-diskutil`). Scan, mount, and unmount USB devices from the command line — useful for manual update file transfers.
+
+#### `adu-persistent-overlay`
+Hybrid persistence strategy using overlayfs and bind mounts to preserve critical data across A/B rootfs updates (e.g. `/etc/adu`, `/var/log/adu`, `/var/lib/adu`).
+
+- Provides `adu-persistence-strategy` virtual package (conflicts with `adu-persistence-symlinks`)
+- Requires `adu-filesystem-layout` (RDEPENDS) and overlayfs kernel support (via `linux-raspberrypi_%.bbappend`)
+- Configuration: `/etc/adu/overlay.conf` and `/etc/overlay/overlay.conf`
+- Scripts installed to `/usr/lib/adu/`: `mount-overlays.sh`, `umount-overlays.sh`, `mount-critical-binds.sh`, `factory-reset.sh`, and others
+
+The persistence strategy is selected via:
 ```
-Device starts with:  v1.0.0 (base image on SD card)
-                      ↓
-OTA Update 1:        v1.0.1 (full 800MB SWU package)
-                      ↓
-OTA Update 2:        v2.0.0 (delta: 50MB diff from v1.0.1)
-                      ↓
-OTA Update 3:        v3.0.0 (delta: 45MB diff from v2.0.0)
+PREFERRED_PROVIDER_adu-persistence-strategy = "adu-persistent-overlay"
+```
+(set in `conf/distro/include/adu-persistence-overlayfs.inc`, included automatically by `layer.conf`)
+
+#### `adu-swap`
+Systemd service that creates and activates a 2GB swap file at `/adu/swapfile` on the ADU partition. Activates automatically on boot and is required for delta reconstruction on memory-constrained devices.
+
+#### `adu-swupdate-hw-compat`
+Generates and installs `/etc/adu-swupdate-hw-compat` containing `${MACHINE} ${HW_REV}` (e.g. `raspberrypi4-64 1.0`). SWUpdate checks this file against the `hardware-compatibility` field in the update manifest to reject incompatible packages.
+
+`HW_REV` defaults to `1.0` and can be overridden via `local.conf` or environment variable.
+
+#### `adu-tools`
+Collection of diagnostic and utility scripts for ADU images.
+
+**Installed locations:**
+- `/usr/sbin/` — `adu-wifi-setup.sh`, `adu-wifi-diagnostics.sh`, `adu-splash-screen-diagnostics.sh`, `adu-motd.sh`
+- `/usr/bin/` — `adu-ctl` (ADU agent control and management tool)
+- `/etc/profile.d/adu-motd.sh` — displays device info on login
+- `/usr/share/doc/adu/` — `GETTING-STARTED.txt` and `README.txt`
+
+**`adu-ctl` commands:** `service`, `journal`, `run`, `health`, `diag`, `config`, `info` — run `adu-ctl help` for the full list.
+
+#### `swupdate` (bbappend)
+Configures the SWUpdate client for ADU use: minimal feature set with OpenSSL for signature verification. The `defconfig` for `raspberrypi4-64` is provided in `recipes-support/swupdate/swupdate/raspberrypi4-64/`.
+
+---
+
+### recipes-azure-device-update
+
+#### `adu-config-setup` (bbappend)
+Overrides the `pkg_postinst_ontarget` from `meta-azure-device-update` to customise symlink creation for the Raspberry Pi persistence strategy:
+- Creates `/etc/adu → /adu/conf`
+- Creates `/var/log/adu → /adu/logs`
+- Does **not** create `/var/lib/adu/downloads` as a directory — this is handled at runtime by `adu-persistent-overlay` as a bind mount
+
+#### `azure-device-update` (bbappend)
+- Removes the `.NET DiffGenTool` runtime dependency (Python bsdiff is used instead for delta generation in the samples layer)
+- Removes `/var/lib/adu/downloads` directory from the rootfs image so it can be replaced by a bind mount at runtime
+
+#### `yocto-a-b-update`
+Platform-specific A/B update handler script (`/usr/lib/adu/yocto-a-b-update.sh`). Called by the SWUpdate handler during an OTA update to:
+1. Write the new rootfs to the inactive partition
+2. Set `boot_partition` to the new slot
+3. Set `upgrade_available=1` and reset `boot_attempts=0`
+4. Trigger a reboot into the new partition
+
+---
+
+### classes
+
+#### `adu-timestamp-check.bbclass`
+Build-time validation class used by `adu-update-image` and `adu-delta-image` recipes to detect stale sstate-cached artifacts. If a build artifact is older than the current base image, the class automatically removes it so BitBake rebuilds it fresh. This prevents silent version mismatches when the base image changes but update/delta recipes are served from cache.
+
+---
+
+### wic
+
+#### `adu-raspberrypi.wks`
+WIC Kickstart file defining the physical partition layout of the SD card image. **Must be kept in sync with `recipes-core/base-files/base-files/raspberrypi4-64/fstab`** — a mismatch will cause mount failures at boot.
+
+Current layout:
+```
+part /boot  --source bootimg-partition --fstype=vfat --size 2048
+part /      --source rootfs            --fstype=ext4 --label rootA
+part        --source rootfs            --fstype=ext4 --label rootB
+part /adu                              --fstype=ext4 --size 8192
+# part /data (commented out — requires GPT)
 ```
 
-**For production use**, copy and customize these recipes for your versioning scheme.
+---
 
-### Delta Update Workflow
+## Network Configuration
 
-Delta updates significantly reduce bandwidth usage by downloading only the differences between versions rather than complete images.
+### WiFi/Bluetooth Support
 
-**Build all versions and generate deltas**:
+WiFi/Bluetooth is **disabled by default** (requires accepting a proprietary firmware license for the BCM43455 chip).
+
+**Enable in build** (choose one method):
+
 ```bash
-# Build base image + 3 update versions
+# Method 1: Environment variable
+export ENABLE_WIFI_BLUETOOTH=1
+export BB_ENV_PASSTHROUGH_ADDITIONS="$BB_ENV_PASSTHROUGH_ADDITIONS ENABLE_WIFI_BLUETOOTH"
 bitbake adu-base-image
-bitbake adu-update-image       # v1.0.1
-bitbake adu-update-image-v2    # v2.0.0
-bitbake adu-update-image-v3    # v3.0.0
 
-# Generate delta files (v1→v2, v2→v3, v1→v3)
-bitbake adu-delta-image
+# Method 2: Add to local.conf
+echo 'ENABLE_WIFI_BLUETOOTH = "1"' >> build/conf/local.conf
 ```
 
-**Output**:
-- Full SWU packages: ~800MB each (depends on rootfs size)
-- Delta files: ~50-150MB each (5-20% of full size)
-- Import manifests: JSON files for Azure Device Update
+**What gets included when enabled**: BCM43455 firmware (`synaptics-killswitch` license accepted), wpa-supplicant, connman, wireless-tools (~50MB additional).
 
-**Delta Savings Example** (1GB rootfs):
-- Full update: 800MB → 10 minutes @ 10Mbps
-- Delta update: 80MB → 1 minute @ 10Mbps
-- **Bandwidth savings**: 90%
+### Quick WiFi Setup (on device)
+
+```bash
+# Connect using connman
+connmanctl
+> enable wifi
+> scan wifi
+> services
+> agent on
+> connect wifi_<id>_YourSSID_managed_psk
+# Enter password when prompted
+> quit
+
+# Verify
+ip addr show wlan0
+ping -c 4 8.8.8.8
+```
+
+**Alternative (wpa_supplicant)**:
+```bash
+wpa_passphrase "YourSSID" "YourPassword" | tee /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
+systemctl enable --now wpa_supplicant@wlan0
+```
+
+---
+
+## Build Artifacts
+
+The layer produces:
+
+- **SD Card Image**: `adu-base-image-raspberrypi4-64.wic.gz` (for initial flashing)
+- **OTA Update Package**: `adu-update-image-raspberrypi4-64.swu` (for cloud deployment)
+- **BMAP file**: `adu-base-image-raspberrypi4-64.wic.bmap` (for bmaptool flashing)
+
+Delta files and versioned update packages (`v2`, `v3`, `.diff`) are produced by the [`meta-azure-device-update-samples`](../meta-azure-device-update-samples/) layer.
+
+---
+
+## Delta Update Workflow
+
+Delta updates reduce bandwidth by downloading only the differences between versions.
 
 **How Delta Updates Work:**
 
@@ -687,8 +491,6 @@ Step 1: Deploy Full Update v1.0 (Initial)
 ┌────────────────────────────────────────┐
 │ Device: v0 (factory) → v1.0            │
 │ Download: v1.0.swu (800MB)             │
-│ Download: v1.0-recompressed.swu (800MB)│
-│ Install: SWUpdate writes to partition  │
 │ Cache: v1.0-recompressed.swu saved     │
 │ Result: Device on v1.0, source cached  │
 └────────────────────────────────────────┘
@@ -704,66 +506,13 @@ Step 2: Deploy Delta Update v2.0
 │ Cache: v2.0-recompressed.swu saved     │
 │ Result: 93% bandwidth saved!           │
 └────────────────────────────────────────┘
-
-Step 3: Deploy Delta Update v3.0
-┌────────────────────────────────────────┐
-│ Device: v2.0 → v3.0                    │
-│ Source: v2.0-recompressed.swu (cached) │
-│ Download: v2-to-v3.diff (60MB)         │
-│ Reconstruct: bspatch src + diff → v3.0 │
-│ Install & cache v3.0 for future deltas │
-└────────────────────────────────────────┘
-```
-
-**Key Components:**
-
-1. **Microsoft Delta Download Handler** (`libmicrosoft_delta_download_handler.so`)
-   - ADU agent extension for delta processing
-   - Checks source cache for matching version
-   - Downloads only diff file instead of full update
-   - Reconstructs target using bspatch algorithm
-   - Falls back to full download if delta fails
-
-2. **Source Update Cache** (`/var/lib/adu/downloads/delta-cache/`)
-   - Stores recompressed SWU files from previous updates
-   - Required for delta reconstruction
-   - Automatically managed by caching script handler
-
-3. **Recompressed SWU Files**
-   - SWU files with zstd-compressed ext4 filesystems
-   - Ensures consistent compression for delta generation
-   - Both source and target must use same compression
-
-4. **Delta Generation** (on build server)
-   - Uses bsdiff to create binary diffs
-   - Generates deltas between all version pairs
-   - Includes round-trip verification
-   - Produces import manifests with relatedFiles
-
-**Multi-Version Delta Support:**
-
-The system can generate deltas between multiple version pairs:
-```bash
-# Delta image recipe generates:
-v1.0-to-v2.0.diff   # For devices on v1.0
-v2.0-to-v3.0.diff   # For devices on v2.0
-v1.0-to-v3.0.diff   # For devices still on v1.0
-
-# Import manifest includes all paths:
-"relatedFiles": [
-  { "filename": "v2-to-v3.diff", "sourceVersion": "2.0.0" },
-  { "filename": "v1-to-v3.diff", "sourceVersion": "1.0.0" }
-]
-
-# Handler automatically selects optimal delta based on cached source
 ```
 
 **Requirements:**
-
-- **SWUpdate with zstd support**: Build with `CONFIG_ZSTD=y`
-- **Disk space**: At least 3x rootfs size for reconstruction
-- **Delta library**: `libadudiffapi.so` (bsdiff/bspatch)
-- **Source cache**: Previous version must be cached
+- SWUpdate built with `CONFIG_ZSTD=y`
+- At least 3× rootfs size free on `/adu` for reconstruction
+- `libadudiffapi.so` (bsdiff/bspatch) from `meta-iot-hub-device-update-delta`
+- Cached previous version `.swu` at `/var/lib/adu/downloads/delta-cache/`
 
 **Troubleshooting Delta Updates:**
 
@@ -781,60 +530,10 @@ swupdate --help | grep -i zstd
 sudo journalctl -u deviceupdate-agent -f | grep -i delta
 
 # Check disk space (need 3x rootfs)
-df -h /var/lib/adu/
+df -h /adu/
 ```
 
-**See**: [recipes-extended/images/](recipes-extended/images/) for recipe source code and [meta-azure-device-update-samples](../meta-azure-device-update-samples/) for delta handler scripts
-
----
-
-## Network Configuration
-
-### WiFi/Bluetooth Support
-
-WiFi/Bluetooth is **disabled by default** (requires accepting proprietary firmware license).
-
-**Enable in build** (choose one method):
-
-```bash
-# Method 1: Environment variable
-export ENABLE_WIFI_BLUETOOTH=1
-export BB_ENV_PASSTHROUGH_ADDITIONS="$BB_ENV_PASSTHROUGH_ADDITIONS ENABLE_WIFI_BLUETOOTH"
-bitbake adu-base-image
-
-# Method 2: Add to local.conf
-echo 'ENABLE_WIFI_BLUETOOTH = "1"' >> build/conf/local.conf
-```
-
-**What gets included**: BCM43455 firmware, wpa-supplicant, connman, wireless-tools (~50MB)
-
-### Quick WiFi Setup (on device)
-
-```bash
-# 1. Unblock WiFi
-rfkill unblock wifi
-ip link set wlan0 up
-
-# 2. Connect using connman
-connmanctl
-> enable wifi
-> scan wifi
-> services
-> agent on
-> connect wifi_<id>_YourSSID_managed_psk
-# Enter password when prompted
-> quit
-
-# 3. Verify
-ip addr show wlan0
-ping -c 4 8.8.8.8
-```
-
-**Alternative (wpa_supplicant)**:
-```bash
-wpa_passphrase "YourSSID" "YourPassword" | tee /etc/wpa_supplicant/wpa_supplicant-wlan0.conf
-systemctl enable --now wpa_supplicant@wlan0
-```
+**See**: [`meta-azure-device-update-samples`](../meta-azure-device-update-samples/) for delta handler scripts and versioned recipe examples.
 
 ---
 
@@ -842,7 +541,7 @@ systemctl enable --now wpa_supplicant@wlan0
 
 ### Boot Loop After Update
 
-**Symptoms**: Device reboots 3 times, then reverts to old partition
+**Symptoms**: Device reboots repeatedly, then reverts to old partition
 
 **Causes**:
 1. Boot health check failing
@@ -858,14 +557,18 @@ journalctl -u adu-boot-validation.service -b -1  # Previous boot
 # Check failed services
 systemctl --failed
 
-# Manual health check
-/usr/lib/adu/adu-boot-validation.sh
+# Run health check manually (no rollback triggered)
+adu-health-check
+
+# Or run the full validation script manually
+adu-boot-validation.sh
 ```
 
 **Solutions**:
-- Fix failing service
-- Adjust health check criteria in `/usr/lib/adu/adu-boot-validation.sh`
-- Verify network connectivity
+- Fix the failing service
+- Adjust health check criteria via `/usr/lib/adu/boot-validation.conf`
+- Add a custom check plugin to `/usr/lib/adu/validation-checks.d/`
+- Use `adu-confirm-boot` to manually confirm a boot as healthy during development
 
 ### Update Package Won't Install
 
@@ -878,16 +581,16 @@ journalctl -u swupdate -n 100
 
 # Verify hardware compatibility
 cat /etc/adu-swupdate-hw-compat
-# Should match hw-compatibility field in update manifest
+# Must match hw-compatibility field in update manifest (e.g. "raspberrypi4-64 1.0")
 
 # Check target partition space
 df -h | grep mmcblk0
 ```
 
 **Solutions**:
-- Verify hardware compatibility string matches
-- Check partition has sufficient space (rootfs size + 20%)
-- Verify signature if using signed updates
+- Verify the hardware compatibility string matches the manifest
+- Check that the target partition has sufficient space (rootfs size + 20%)
+- Verify RSA signature if using signed updates
 
 ### Delta Reconstruction Fails
 
@@ -895,21 +598,15 @@ df -h | grep mmcblk0
 
 **Debug**:
 ```bash
-# Check memory and swap
 free -h
 swapon --show
-
-# Check staging space
 df -h /adu
-du -sh /adu/staging/*
-
-# Check delta file integrity
-sha256sum /adu/downloads/delta.diff
+du -sh /adu/staging/* 2>/dev/null
 ```
 
 **Solutions**:
 ```bash
-# Increase swap size
+# Increase swap size temporarily
 dd if=/dev/zero of=/adu/swapfile bs=1M count=4096  # 4GB swap
 chmod 600 /adu/swapfile
 mkswap /adu/swapfile
@@ -917,57 +614,44 @@ swapon /adu/swapfile
 
 # Free up staging space
 rm -rf /adu/staging/*
-
-# Re-download delta if corrupted
 ```
 
 ### Build Issues
 
 #### Recipe Parse Errors
-
-**Error**: `ParseError: not a BitBake file`
-
-**Cause**: Using `require` with `.bbappend` file instead of `.inc`
-
-**Solution**: Create `.inc` file with shared code, require from `.bbappend`
+**Error**: `ParseError: not a BitBake file`  
+**Cause**: Using `require` with a `.bbappend` file instead of `.inc`  
+**Solution**: Extract shared code to a `.inc` file and `require` that instead
 
 #### Missing Dependencies
-
-**Error**: `QA Issue: package requires /bin/bash, but no providers found`
-
-**Solution**: Add to recipe:
+**Error**: `QA Issue: package requires /bin/bash, but no providers found`  
+**Solution**: Add to the recipe:
 ```bitbake
 RDEPENDS:${PN} += "bash"
 ```
 
 #### WIC Image Creation Fails
-
-**Error**: `cannot stat device tree file`
-
-**Solution**: Add kernel dependency:
+**Error**: `cannot stat device tree file`  
+**Solution**: Add kernel deploy dependency:
 ```bitbake
 do_image_wic[depends] += "virtual/kernel:do_deploy"
 ```
 
-**Force rebuild**:
-```bash
-bitbake -c cleansstate virtual/kernel
-bitbake virtual/kernel
-bitbake adu-base-image
-```
-
 #### Shared File Conflict
-
-**Error**: `files already exist in shared area` (SWU files)
-
+**Error**: `files already exist in shared area` (SWU files)  
 **Solution**:
 ```bash
-# Remove old deployment artifacts
-rm -f tmp/deploy/images/raspberrypi4-64/adu-update-image-v*.swu
-rm -f tmp/deploy/images/raspberrypi4-64/manifest-*-adu-update-image-v*.deploy
+rm -f tmp/deploy/images/raspberrypi4-64/adu-update-image*.swu
+bitbake adu-update-image
+```
 
-# Rebuild
-bitbake adu-update-image-v1
+#### Stale Update Artifacts After Base Image Rebuild
+**Symptom**: Update `.swu` or delta `.diff` files are older than the base image  
+**Cause**: sstate cache served old artifacts  
+**Solution**: The `adu-timestamp-check.bbclass` detects and auto-removes stale artifacts on the next build. If you need to force a clean immediately:
+```bash
+bitbake -c cleansstate adu-update-image
+bitbake adu-update-image
 ```
 
 **For comprehensive troubleshooting**, see [Troubleshooting Guide](docs/troubleshooting.md)
@@ -976,13 +660,15 @@ bitbake adu-update-image-v1
 
 ## Key Differences from Standard Raspberry Pi Images
 
-1. **A/B Partitions**: Two root filesystems instead of one
-2. **Large ADU Partition**: 8GB dedicated space for updates and swap
-3. **Optional Data Partition**: 1GB customer data storage (FAT32)
-4. **Boot Health**: Automatic validation and rollback system
-5. **ACL Security**: Restricted access to ADU data
-6. **Azure Integration**: Full ADU agent with delta support
-7. **Swap File**: Automatic creation for delta operations
+1. **A/B Partitions**: Two root filesystems (rootA/rootB) instead of one
+2. **Large ADU Partition**: 8GB dedicated space for updates, staging, and swap
+3. **Boot Health**: Automatic validation and rollback system (configurable attempt limit)
+4. **ACL Security**: `/adu` partition restricted to `adu` group (uid/gid 800)
+5. **Azure Integration**: Full ADU agent with delta handler support
+6. **Swap File**: Automatic 2GB swap creation for delta operations
+7. **Persistent Overlay**: overlayfs-based strategy to survive A/B rootfs swaps
+
+---
 
 ## License
 
