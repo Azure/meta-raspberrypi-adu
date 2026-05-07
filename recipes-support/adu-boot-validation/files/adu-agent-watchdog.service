@@ -1,0 +1,10 @@
+[Unit]
+Description=ADU Agent Health Watchdog
+Documentation=https://github.com/Azure/iot-hub-device-update
+After=deviceupdate-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/adu-agent-watchdog.sh
+StandardOutput=journal
+StandardError=journal

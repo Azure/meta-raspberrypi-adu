@@ -18,7 +18,7 @@ StandardError=journal
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/adu /var/lib/adu/states /var/lock /var/log/adu /var/run
+ReadWritePaths=/var/lib/adu /var/lib/adu/states /var/lock /var/log/adu /var/run /boot
 
 # Don't restart on failure - we want to continue boot
 Restart=no

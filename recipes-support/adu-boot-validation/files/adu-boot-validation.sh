@@ -69,6 +69,7 @@ BLACKLIST_FILE="${STATE_DIR}/failed_workflows.txt"
 ROLLBACK_EVENT_FILE="${STATE_DIR}/rollback_event.json"
 BOOT_HISTORY_FILE="${STATE_DIR}/boot_history.log"
 LOCK_FILE="/var/lock/adu-state.lock"
+UBOOT_LOCK_FILE="/var/lock/adu-uboot-env.lock"
 MAX_BLACKLIST_ENTRIES=10
 MAX_PARTITION_SWITCHES=3
 FLAPPING_WINDOW_SECONDS=600
@@ -183,23 +184,46 @@ get_uboot_env() {
     echo "$value"
 }
 
-# Set U-Boot environment variable
+# Set U-Boot environment variable (with shared lock)
 set_uboot_env() {
     local var_name="$1"
     local value="$2"
     
     log_info "Setting U-Boot env: $var_name=$value"
-    if ! $UBOOT_SETENV "$var_name" "$value" 2>&1 | tee -a "$LOG_FILE"; then
-        log_error "Failed to set U-Boot variable: $var_name"
-        return 1
-    fi
-    return 0
+    (
+        flock -x 200
+        if ! $UBOOT_SETENV "$var_name" "$value" 2>&1 | tee -a "$LOG_FILE"; then
+            log_error "Failed to set U-Boot variable: $var_name"
+            return 1
+        fi
+    ) 200>"$UBOOT_LOCK_FILE"
+    return $?
 }
 
-# Write data atomically with sync
+# Set multiple U-Boot environment variables atomically (single lock acquisition)
+set_uboot_env_batch() {
+    (
+        flock -x 200
+        while [ $# -ge 2 ]; do
+            local var_name="$1"
+            local value="$2"
+            shift 2
+            log_info "Setting U-Boot env (batch): $var_name=$value"
+            if ! $UBOOT_SETENV "$var_name" "$value" 2>&1 | tee -a "$LOG_FILE"; then
+                log_error "Failed to set U-Boot variable: $var_name"
+                return 1
+            fi
+        done
+    ) 200>"$UBOOT_LOCK_FILE"
+    return $?
+}
+
+# Write data atomically with sync (including parent directory)
 write_atomic() {
     local file="$1"
     local content="$2"
+    local dir
+    dir=$(dirname "$file")
     
     if ! echo "$content" > "${file}.tmp" 2>/dev/null; then
         error_phase1 "Failed to write to ${file}.tmp"
@@ -215,6 +239,8 @@ write_atomic() {
     fi
     
     sync "$file" 2>/dev/null
+    # fsync parent directory to persist the rename across power loss
+    sync "$dir" 2>/dev/null || true
     return 0
 }
 
@@ -384,22 +410,27 @@ handle_flapping() {
     # Only blacklist if there was an update in progress
     if [ "$update_phase" = "applied_pending_validation" ] && [ "$workflow_id" != "unknown" ] && [ -n "$workflow_id" ]; then
         log_phase1 "Blacklisting workflow $workflow_id due to flapping during update validation"
-        echo "$workflow_id:$(date -Iseconds):partition_flapping" >> "$BLACKLIST_FILE" 2>/dev/null && \
-            sync "$BLACKLIST_FILE" 2>/dev/null || true
+        (
+            flock -x 200
+            echo "$workflow_id:$(date -Iseconds):partition_flapping" >> "$BLACKLIST_FILE" 2>/dev/null && \
+                sync "$BLACKLIST_FILE" 2>/dev/null || true
+        ) 200>"$LOCK_FILE"
     fi
     
     # Force stable boot to last known good partition
-    local lkg_partition=$(fw_printenv -n last_known_good_partition 2>/dev/null || echo "rootA")
+    local lkg_partition
+    lkg_partition=$(fw_printenv -n last_known_good_partition 2>/dev/null || echo "rootA")
     log_phase1 "Forcing boot to last known good partition: $lkg_partition"
     
-    fw_setenv boot_partition "$lkg_partition" 2>/dev/null || true
-    fw_setenv upgrade_available 0 2>/dev/null || true
-    fw_setenv boot_attempts 0 2>/dev/null || true
-    fw_setenv boot_result success 2>/dev/null || true
+    set_uboot_env_batch \
+        boot_partition "$lkg_partition" \
+        upgrade_available 0 \
+        boot_attempts 0 \
+        boot_result success
     
-    # Clear state file
+    # Clear state file atomically
     if [ -f "$STATE_FILE" ]; then
-        echo '{"update_phase":"idle","flapping_detected":true}' > "$STATE_FILE" 2>/dev/null || true
+        write_atomic "$STATE_FILE" '{"update_phase":"idle","flapping_detected":true}' || true
     fi
     
     log_phase1 "System stabilized to $lkg_partition"
@@ -429,11 +460,23 @@ run_phase1() {
         error_phase1 "Rollback check failed - continuing boot anyway"
     fi
     
-    # Safety mechanism: If not in validation mode, ensure boot_result is set to success
+    # Safety mechanism: If not in validation mode, ensure boot state is clean
     local upgrade_available=$(fw_printenv -n upgrade_available 2>/dev/null || echo "0")
     if [ "$upgrade_available" = "0" ]; then
-        log_phase1 "Not in validation mode - marking boot as successful"
-        fw_setenv boot_result success 2>/dev/null || true
+        log_phase1 "Not in validation mode - marking boot as successful and resetting counters"
+        # Check if this is a post-rollback boot (rollback_occurred set by U-Boot)
+        local rollback_flag=$(fw_printenv -n rollback_occurred 2>/dev/null || echo "0")
+        if [ "$rollback_flag" = "1" ]; then
+            log_phase1 "Post-rollback boot detected - preserving rollback state for userspace"
+            # Don't overwrite boot_result=rollback, just reset the counter
+            set_uboot_env_batch \
+                boot_attempts 0 \
+                rollback_occurred 0
+        else
+            set_uboot_env_batch \
+                boot_result success \
+                boot_attempts 0
+        fi
     else
         log_phase1 "In validation mode - proceeding to Phase 2 for health checks"
     fi
@@ -627,10 +670,8 @@ run_custom_checks() {
         log_info "Running custom check: $check_name"
         
         local output exit_code
-        set +e
-        output=$("$check_script" 2>&1)
+        output=$("$check_script" 2>&1) || true
         exit_code=$?
-        set -e
         
         case $exit_code in
             0) CHECK_RESULTS["Custom:$check_name"]="passed" ;;
@@ -684,8 +725,15 @@ run_phase2() {
     # Check for manual override first
     if check_manual_override; then
         log_info "Manual override confirmed - marking boot as successful"
+        local boot_partition
+        boot_partition=$(get_uboot_env "boot_partition")
         set_uboot_env "boot_result" "success"
         set_uboot_env "upgrade_available" "0"
+        set_uboot_env "boot_attempts" "0"
+        if [[ -n "$boot_partition" ]]; then
+            set_uboot_env "last_known_good_partition" "$boot_partition"
+        fi
+        set_uboot_env "update_in_progress_id" "" || true
         save_state "success_manual"
         rm -f "$OVERRIDE_FLAG"
         return 0
@@ -728,6 +776,23 @@ run_phase2() {
         
         set_uboot_env "boot_result" "failed"
         save_state "failed"
+        
+        # Trigger reboot to allow U-Boot to retry or rollback
+        # The boot_attempts counter was already incremented by U-Boot,
+        # so after max_boot_attempts reboots, U-Boot will auto-rollback
+        local boot_attempts_val
+        boot_attempts_val=$(get_uboot_env "boot_attempts")
+        local max_attempts_val
+        max_attempts_val=$(get_uboot_env "max_boot_attempts")
+        log_error "Boot attempts: ${boot_attempts_val}/${max_attempts_val} - rebooting for retry/rollback"
+        
+        # Give operator a brief window to intervene via serial console
+        sleep 10
+        
+        # Reboot to allow U-Boot to handle retry/rollback
+        log_error "Rebooting system for boot retry..."
+        /sbin/reboot || true
+        
         return 1
     fi
     
@@ -741,12 +806,23 @@ run_phase2() {
     log_info "All critical checks passed - marking boot as successful"
     set_uboot_env "boot_result" "success"
     set_uboot_env "upgrade_available" "0"
+    set_uboot_env "boot_attempts" "0"
     
-    # Update last known good
+    # Update last known good and clear update tracking
     local boot_partition
     boot_partition=$(get_uboot_env "boot_partition")
     if [[ -n "$boot_partition" ]]; then
         set_uboot_env "last_known_good_partition" "$boot_partition"
+    fi
+    set_uboot_env "update_in_progress_id" "" || true
+    
+    # Update state file to idle
+    if [[ -f "$STATE_FILE" ]] && command -v jq &>/dev/null; then
+        local updated_state
+        updated_state=$(jq '.update_phase = "validated"' "$STATE_FILE" 2>/dev/null)
+        if [[ -n "$updated_state" ]]; then
+            write_atomic "$STATE_FILE" "$updated_state" || true
+        fi
     fi
     
     save_state "success"

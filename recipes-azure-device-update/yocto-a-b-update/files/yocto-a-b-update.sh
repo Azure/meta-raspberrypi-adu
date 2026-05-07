@@ -104,6 +104,12 @@ selection=""
 current_dev_partition=0
 update_dev_partition=0
 
+# Shared lock file for U-Boot environment access
+UBOOT_LOCK_FILE="/var/lock/adu-uboot-env.lock"
+# State directory for update tracking
+STATE_DIR="/var/lib/adu/states"
+STATE_FILE="${STATE_DIR}/swupdate_state.json"
+
 update_timestamp() {
     # See https://man7.org/linux/man-pages/man1/date.1.html
     _timestamp="$(date +'%Y/%m/%d:%H%M%S')"
@@ -274,7 +280,10 @@ SetUBootEnv() {
     local -n retval=$3  # name reference for return value
 
     log_debug "Setting U-Boot env: $varname=$value"
-    fw_setenv "$varname" "$value"
+    (
+        flock -x 200
+        fw_setenv "$varname" "$value"
+    ) 200>"$UBOOT_LOCK_FILE"
     retval=$?
 
     if [[ $retval -ne 0 ]]; then
@@ -327,6 +336,32 @@ initialize_partitions() {
     fi
 
     log_info "Partition detection: current=$current_partition, update=$update_partition"
+    
+    # Safety check: verify U-Boot boot_partition matches actual root partition
+    local actual_root=""
+    if grep -q "root=/dev/mmcblk0p2" /proc/cmdline 2>/dev/null; then
+        actual_root="rootA"
+    elif grep -q "root=/dev/mmcblk0p3" /proc/cmdline 2>/dev/null; then
+        actual_root="rootB"
+    fi
+    
+    if [[ -n "$actual_root" && "$actual_root" != "$current_partition" ]]; then
+        log_warn "WARNING: U-Boot boot_partition ($current_partition) does not match actual root ($actual_root)"
+        log_warn "Using actual root partition to prevent overwriting active rootfs"
+        current_partition="$actual_root"
+        if [[ $current_partition == "rootA" ]]; then
+            selection="stable,copy2"
+            update_partition="rootB"
+            current_dev_partition=2
+            update_dev_partition=3
+        else
+            selection="stable,copy1"
+            update_partition="rootA"
+            current_dev_partition=3
+            update_dev_partition=2
+        fi
+    fi
+    
     return 0
 }
 
@@ -1078,6 +1113,32 @@ ApplyUpdate() {
 
     # Check if workflow is blacklisted (see CheckWorkflowBlacklist function for details)
     CheckWorkflowBlacklist "$workflow_id" "Apply"
+
+    # Write update state file BEFORE switching boot partition
+    # This is critical for rollback detection: adu-boot-validation.sh reads this file
+    # to determine if a rollback occurred (expected partition != actual partition)
+    log_info "Writing update state file: $STATE_FILE"
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    
+    # Atomic write: write to temp file, sync, rename
+    local state_content="{
+  \"update_phase\": \"applied_pending_validation\",
+  \"workflow_id\": \"$workflow_id\",
+  \"target_partition\": \"$update_partition\",
+  \"previous_partition\": \"$current_partition\",
+  \"installed_criteria\": \"${installed_criteria:-}\",
+  \"timestamp\": \"$(date -Iseconds)\"
+}"
+    
+    if echo "$state_content" > "${STATE_FILE}.tmp" 2>/dev/null; then
+        sync "${STATE_FILE}.tmp" 2>/dev/null || true
+        mv "${STATE_FILE}.tmp" "$STATE_FILE" 2>/dev/null || true
+        sync "$STATE_FILE" 2>/dev/null || true
+        sync "$STATE_DIR" 2>/dev/null || true
+        log_info "State file written successfully"
+    else
+        log_warn "Failed to write state file (non-fatal, rollback detection may not work)"
+    fi
 
     # Set the bootloader environment variables
     # to tell the bootloader to boot into the new partition.

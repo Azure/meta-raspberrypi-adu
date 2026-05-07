@@ -1,0 +1,14 @@
+[Unit]
+Description=ADU Agent Health Watchdog Timer
+Documentation=https://github.com/Azure/iot-hub-device-update
+After=multi-user.target
+
+[Timer]
+# First check 2 minutes after multi-user.target
+OnActiveSec=120
+# Then check every 5 minutes
+OnUnitActiveSec=300
+AccuracySec=30
+
+[Install]
+WantedBy=multi-user.target

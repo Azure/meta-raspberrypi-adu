@@ -16,6 +16,9 @@ SRC_URI = " \
     file://adu-boot-validation.service \
     file://boot-validation.conf \
     file://check-example.sh \
+    file://adu-agent-watchdog.sh \
+    file://adu-agent-watchdog.service \
+    file://adu-agent-watchdog.timer \
 "
 
 S = "${WORKDIR}"
@@ -37,7 +40,7 @@ USERADD_PACKAGES = "${PN}"
 GROUPADD_PARAM:${PN} = "--gid 800 --system adu"
 USERADD_PARAM:${PN} = "--uid 800 --system -g adu --no-create-home --shell /bin/false adu"
 
-SYSTEMD_SERVICE:${PN} = "adu-boot-validation.service"
+SYSTEMD_SERVICE:${PN} = "adu-boot-validation.service adu-agent-watchdog.timer adu-agent-watchdog.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 
 do_install() {
@@ -48,9 +51,14 @@ do_install() {
     # Install manual confirmation tool
     install -m 0755 ${WORKDIR}/adu-confirm-boot ${D}${bindir}/adu-confirm-boot
     
-    # Install systemd service
+    # Install agent watchdog script
+    install -m 0755 ${WORKDIR}/adu-agent-watchdog.sh ${D}${bindir}/adu-agent-watchdog.sh
+    
+    # Install systemd services and timer
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/adu-boot-validation.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/adu-agent-watchdog.service ${D}${systemd_system_unitdir}/
+    install -m 0644 ${WORKDIR}/adu-agent-watchdog.timer ${D}${systemd_system_unitdir}/
     
     # Install configuration file to /usr/lib/adu (rootfs, not data partition)
     install -d ${D}${prefix}/lib/adu
@@ -71,7 +79,10 @@ do_install() {
 FILES:${PN} += " \
     ${bindir}/adu-boot-validation.sh \
     ${bindir}/adu-confirm-boot \
+    ${bindir}/adu-agent-watchdog.sh \
     ${systemd_system_unitdir}/adu-boot-validation.service \
+    ${systemd_system_unitdir}/adu-agent-watchdog.service \
+    ${systemd_system_unitdir}/adu-agent-watchdog.timer \
     ${prefix}/lib/adu/boot-validation.conf \
     ${prefix}/lib/adu/validation-checks.d \
     ${prefix}/lib/adu/validation-checks.d/check-example.sh.disabled \

@@ -17,6 +17,7 @@ readonly OVERRIDE_FLAG="/var/run/adu-boot-confirmed"
 readonly UBOOT_ENV="/usr/bin/fw_printenv"
 readonly UBOOT_SETENV="/usr/bin/fw_setenv"
 readonly VALIDATION_SERVICE="adu-boot-validation.service"
+readonly UBOOT_LOCK_FILE="/var/lock/adu-uboot-env.lock"
 
 # Color codes
 readonly RED='\033[0;31m'
@@ -51,16 +52,19 @@ get_uboot_env() {
     echo "$value"
 }
 
-# Set U-Boot environment variable
+# Set U-Boot environment variable (with shared lock)
 set_uboot_env() {
     local var_name="$1"
     local value="$2"
     
-    if ! $UBOOT_SETENV "$var_name" "$value" 2>&1; then
-        echo -e "${RED}ERROR: Failed to set U-Boot variable: $var_name${NC}" >&2
-        return 1
-    fi
-    return 0
+    (
+        flock -x 200
+        if ! $UBOOT_SETENV "$var_name" "$value" 2>&1; then
+            echo -e "${RED}ERROR: Failed to set U-Boot variable: $var_name${NC}" >&2
+            return 1
+        fi
+    ) 200>"$UBOOT_LOCK_FILE"
+    return $?
 }
 
 # Show current status
@@ -269,33 +273,38 @@ confirm_boot() {
     fi
     
     echo ""
-    echo "Creating manual override flag..."
-    touch "$OVERRIDE_FLAG"
+    echo "Performing full boot confirmation..."
     
-    echo "Restarting validation service to apply override..."
-    if ! systemctl restart "$VALIDATION_SERVICE"; then
-        echo -e "${RED}ERROR: Failed to restart validation service${NC}" >&2
+    # Set all U-Boot variables directly (full state transition)
+    local errors=0
+    
+    set_uboot_env "boot_result" "success" || ((errors++))
+    set_uboot_env "upgrade_available" "0" || ((errors++))
+    set_uboot_env "boot_attempts" "0" || ((errors++))
+    
+    if [[ -n "$boot_partition" ]]; then
+        set_uboot_env "last_known_good_partition" "$boot_partition" || ((errors++))
+    fi
+    
+    set_uboot_env "update_in_progress_id" "" 2>/dev/null || true
+    
+    if [[ $errors -gt 0 ]]; then
+        echo -e "${RED}ERROR: Failed to set $errors U-Boot variable(s)${NC}" >&2
         rm -f "$OVERRIDE_FLAG"
         exit 1
     fi
     
-    # Wait a moment for service to complete
-    sleep 2
+    # Also create override flag for the validation service
+    touch "$OVERRIDE_FLAG"
     
-    # Verify the override was applied
-    boot_result=$(get_uboot_env "boot_result")
-    upgrade_available=$(get_uboot_env "upgrade_available")
-    
-    if [[ "$boot_result" == "success" && "$upgrade_available" == "0" ]]; then
-        echo -e "${GREEN}✓ Boot confirmed successfully${NC}"
-        echo ""
-        echo "The system is now marked as stable."
-        echo "The update has been accepted."
-    else
-        echo -e "${RED}ERROR: Failed to confirm boot${NC}" >&2
-        echo "boot_result=$boot_result, upgrade_available=$upgrade_available"
-        exit 1
-    fi
+    echo -e "${GREEN}✓ Boot confirmed successfully${NC}"
+    echo ""
+    echo "The system is now marked as stable."
+    echo "The update has been accepted."
+    echo "  boot_result=success"
+    echo "  upgrade_available=0"
+    echo "  boot_attempts=0"
+    echo "  last_known_good_partition=$boot_partition"
 }
 
 # Main entry point
