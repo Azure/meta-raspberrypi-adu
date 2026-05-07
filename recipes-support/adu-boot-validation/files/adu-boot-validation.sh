@@ -68,10 +68,12 @@ STATE_FILE="${STATE_DIR}/swupdate_state.json"
 BLACKLIST_FILE="${STATE_DIR}/failed_workflows.txt"
 ROLLBACK_EVENT_FILE="${STATE_DIR}/rollback_event.json"
 BOOT_HISTORY_FILE="${STATE_DIR}/boot_history.log"
+BOOT_EVENT_LOG="${STATE_DIR}/boot-events.log"
 LOCK_FILE="/var/lock/adu-state.lock"
 UBOOT_LOCK_FILE="/var/lock/adu-uboot-env.lock"
 MAX_BLACKLIST_ENTRIES=10
 MAX_PARTITION_SWITCHES=3
+MAX_BOOT_EVENT_LINES=500
 FLAPPING_WINDOW_SECONDS=600
 
 # Phase 2: Health Validation Configuration
@@ -139,6 +141,50 @@ initialize_logging() {
     log_info "========================================="
     log_info "ADU Boot Validation Service Started"
     log_info "========================================="
+}
+
+# ============================================================================
+# Structured Boot Event Log
+# ============================================================================
+# Append-only JSON-lines file at /var/lib/adu/states/boot-events.log
+# Each line: {"ts":"...","event":"...","partition":"...","detail":{...}}
+# Provides a single trace of the full boot lifecycle for diagnostics.
+
+BOOT_SESSION_ID=""
+
+emit_boot_event() {
+    local event="$1"
+    shift
+    local detail="$*"
+    local ts
+    ts=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
+
+    # Generate boot session ID on first call (ties all events in one boot together)
+    if [[ -z "$BOOT_SESSION_ID" ]]; then
+        BOOT_SESSION_ID=$(head -c 8 /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '-' || echo "$$")
+    fi
+
+    local partition
+    partition=$(get_current_partition 2>/dev/null || echo "unknown")
+
+    local json="{\"ts\":\"${ts}\",\"boot_id\":\"${BOOT_SESSION_ID}\",\"event\":\"${event}\",\"partition\":\"${partition}\""
+    if [[ -n "$detail" ]]; then
+        json="${json},\"detail\":${detail}}"
+    else
+        json="${json}}"
+    fi
+
+    echo "$json" >> "$BOOT_EVENT_LOG" 2>/dev/null || true
+
+    # Rotate: keep last N lines
+    if [[ -f "$BOOT_EVENT_LOG" ]]; then
+        local line_count
+        line_count=$(wc -l < "$BOOT_EVENT_LOG" 2>/dev/null || echo "0")
+        if [[ "$line_count" -gt "$MAX_BOOT_EVENT_LINES" ]]; then
+            tail -n "$MAX_BOOT_EVENT_LINES" "$BOOT_EVENT_LOG" > "${BOOT_EVENT_LOG}.tmp" 2>/dev/null
+            mv "${BOOT_EVENT_LOG}.tmp" "$BOOT_EVENT_LOG" 2>/dev/null || true
+        fi
+    fi
 }
 
 # ============================================================================
@@ -387,6 +433,7 @@ check_rollback() {
         } 200>"$LOCK_FILE"
         
         log_phase1 "Rollback detection complete - workflow blacklisted"
+        emit_boot_event "rollback_detected" "{\"workflow_id\":\"$workflow_id\",\"target_partition\":\"$target_partition\",\"actual_partition\":\"$current_partition\",\"reason\":\"$reason\"}"
         return 0
     else
         log_phase1 "Boot validation passed: on expected partition $current_partition"
@@ -440,15 +487,18 @@ handle_flapping() {
 run_phase1() {
     CURRENT_PHASE="phase1"
     log_phase1 "=== Phase 1: Rollback Detection Starting ==="
+    emit_boot_event "phase1_start" "{\"upgrade_available\":\"$(fw_printenv -n upgrade_available 2>/dev/null || echo unknown)\"}"
     
     ensure_directories
     
     local current_partition=$(get_current_partition)
     log_phase1 "Current partition: $current_partition"
+    emit_boot_event "boot_partition_detected" "{\"partition\":\"$current_partition\",\"boot_attempts\":\"$(fw_printenv -n boot_attempts 2>/dev/null || echo unknown)\",\"boot_result\":\"$(fw_printenv -n boot_result 2>/dev/null || echo unknown)\"}"
     
     # Check for partition flapping
     if detect_partition_flapping "$current_partition"; then
         error_phase1 "Partition flapping detected - system unstable"
+        emit_boot_event "flapping_detected" "{\"partition\":\"$current_partition\"}"
         handle_flapping "$current_partition"
         ROLLBACK_DETECTED=true
     fi
@@ -468,11 +518,13 @@ run_phase1() {
         local rollback_flag=$(fw_printenv -n rollback_occurred 2>/dev/null || echo "0")
         if [ "$rollback_flag" = "1" ]; then
             log_phase1 "Post-rollback boot detected - preserving rollback state for userspace"
+            emit_boot_event "post_rollback_boot" "{\"rollback_flag\":\"1\",\"boot_result\":\"$(fw_printenv -n boot_result 2>/dev/null || echo unknown)\"}"
             # Don't overwrite boot_result=rollback, just reset the counter
             set_uboot_env_batch \
                 boot_attempts 0 \
                 rollback_occurred 0
         else
+            emit_boot_event "stable_boot_confirmed" "{\"action\":\"reset_counters\"}"
             set_uboot_env_batch \
                 boot_result success \
                 boot_attempts 0
@@ -720,6 +772,7 @@ run_phase2() {
     # If rollback was detected in Phase 1, we're in safe mode
     if [[ "$ROLLBACK_DETECTED" == "true" ]]; then
         log_info "Rollback detected in Phase 1 - running in SAFE MODE (all failures downgraded to warnings)"
+        emit_boot_event "phase2_safe_mode" "{\"reason\":\"rollback_detected\"}"
     fi
     
     # Check for manual override first
@@ -769,6 +822,7 @@ run_phase2() {
         for failure in "${CRITICAL_FAILURES[@]}"; do
             log_error "  - $failure"
         done
+        emit_boot_event "validation_failed" "{\"critical_count\":${#CRITICAL_FAILURES[@]},\"failures\":[\"${CRITICAL_FAILURES[*]}\"]}"
         
         if [[ "$ALLOW_MANUAL_OVERRIDE" == "true" ]]; then
             log_info "Manual override enabled. Run 'sudo adu-confirm-boot confirm' to override."
@@ -791,6 +845,7 @@ run_phase2() {
         
         # Reboot to allow U-Boot to handle retry/rollback
         log_error "Rebooting system for boot retry..."
+        emit_boot_event "reboot_triggered" "{\"reason\":\"validation_failed\",\"boot_attempts\":\"${boot_attempts_val}\",\"max\":\"${max_attempts_val}\"}"
         /sbin/reboot || true
         
         return 1
@@ -804,6 +859,7 @@ run_phase2() {
     fi
     
     log_info "All critical checks passed - marking boot as successful"
+    emit_boot_event "validation_success" "{\"warnings\":${#WARNINGS[@]},\"partition\":\"$(get_uboot_env boot_partition)\"}"
     set_uboot_env "boot_result" "success"
     set_uboot_env "upgrade_available" "0"
     set_uboot_env "boot_attempts" "0"

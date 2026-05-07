@@ -109,6 +109,7 @@ UBOOT_LOCK_FILE="/var/lock/adu-uboot-env.lock"
 # State directory for update tracking
 STATE_DIR="/var/lib/adu/states"
 STATE_FILE="${STATE_DIR}/swupdate_state.json"
+BOOT_EVENT_LOG="${STATE_DIR}/boot-events.log"
 
 update_timestamp() {
     # See https://man7.org/linux/man-pages/man1/date.1.html
@@ -1136,6 +1137,8 @@ ApplyUpdate() {
         sync "$STATE_FILE" 2>/dev/null || true
         sync "$STATE_DIR" 2>/dev/null || true
         log_info "State file written successfully"
+        # Emit structured event for diagnostics
+        echo "{\"ts\":\"$(date -Iseconds)\",\"boot_id\":\"update\",\"event\":\"update_applied\",\"detail\":{\"workflow_id\":\"$workflow_id\",\"target_partition\":\"$update_partition\",\"previous_partition\":\"$current_partition\"}}" >> "$BOOT_EVENT_LOG" 2>/dev/null || true
     else
         log_warn "Failed to write state file (non-fatal, rollback detection may not work)"
     fi

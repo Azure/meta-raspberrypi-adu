@@ -9,6 +9,7 @@ LOG_TAG="adu-agent-watchdog"
 AGENT_SERVICE="deviceupdate-agent.service"
 MAX_RESTART_ATTEMPTS=3
 RESTART_COUNTER_FILE="/var/lib/adu/states/agent_restart_count"
+BOOT_EVENT_LOG="/var/lib/adu/states/boot-events.log"
 
 log_info() {
     logger -t "$LOG_TAG" -p user.info "$*"
@@ -20,6 +21,20 @@ log_warn() {
 
 log_error() {
     logger -t "$LOG_TAG" -p user.err "$*"
+}
+
+emit_watchdog_event() {
+    local event="$1"
+    local detail="${2:-}"
+    local ts
+    ts=$(date -Iseconds 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
+    local json="{\"ts\":\"${ts}\",\"boot_id\":\"watchdog\",\"event\":\"${event}\""
+    if [[ -n "$detail" ]]; then
+        json="${json},\"detail\":${detail}}"
+    else
+        json="${json}}"
+    fi
+    echo "$json" >> "$BOOT_EVENT_LOG" 2>/dev/null || true
 }
 
 # Get current restart count (resets on successful check)
@@ -54,26 +69,32 @@ local_count=$(get_restart_count)
 log_error "Agent service is NOT running (restart attempts: $local_count/$MAX_RESTART_ATTEMPTS)"
 
 if [[ "$local_count" -ge "$MAX_RESTART_ATTEMPTS" ]]; then
-    log_error "Max restart attempts ($MAX_RESTART_ATTEMPTS) exceeded — not restarting"
-    log_error "Manual intervention required: systemctl status $AGENT_SERVICE"
+    log_error "Max restart attempts ($MAX_RESTART_ATTEMPTS) exceeded — triggering reboot"
+    emit_watchdog_event "agent_max_restarts_exceeded" "{\"attempts\":$local_count,\"action\":\"reboot\"}"
+    # Reboot to let U-Boot handle boot_attempts tracking
+    /sbin/reboot || true
     exit 1
 fi
 
 # Attempt restart
 log_warn "Attempting to restart $AGENT_SERVICE (attempt $((local_count + 1))/$MAX_RESTART_ATTEMPTS)"
 set_restart_count "$((local_count + 1))"
+emit_watchdog_event "agent_restart_attempt" "{\"attempt\":$((local_count + 1)),\"max\":$MAX_RESTART_ATTEMPTS}"
 
 if systemctl restart "$AGENT_SERVICE" 2>/dev/null; then
     # Wait briefly and verify
     sleep 5
     if systemctl is-active --quiet "$AGENT_SERVICE" 2>/dev/null; then
         log_info "Agent service restarted successfully"
+        emit_watchdog_event "agent_restart_success" "{\"attempt\":$((local_count + 1))}"
         exit 0
     else
         log_error "Agent service failed to start after restart"
+        emit_watchdog_event "agent_restart_failed" "{\"attempt\":$((local_count + 1)),\"reason\":\"not_active_after_restart\"}"
         exit 1
     fi
 else
     log_error "Failed to restart agent service"
+    emit_watchdog_event "agent_restart_failed" "{\"attempt\":$((local_count + 1)),\"reason\":\"systemctl_error\"}"
     exit 1
 fi
