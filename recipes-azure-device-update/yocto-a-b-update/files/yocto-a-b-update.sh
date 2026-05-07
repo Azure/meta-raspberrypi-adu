@@ -104,6 +104,18 @@ selection=""
 current_dev_partition=0
 update_dev_partition=0
 
+# Load board configuration for device paths
+BOARD_CONF="/etc/adu/board.conf"
+if [[ -f "$BOARD_CONF" ]]; then
+    # shellcheck source=/dev/null
+    . "$BOARD_CONF"
+fi
+ADU_CMDLINE_ROOT_A="${ADU_CMDLINE_ROOT_A:-root=/dev/mmcblk0p2}"
+ADU_CMDLINE_ROOT_B="${ADU_CMDLINE_ROOT_B:-root=/dev/mmcblk0p3}"
+ADU_ROOT_A_DEV="${ADU_ROOT_A_DEV:-/dev/mmcblk0p2}"
+ADU_ROOT_B_DEV="${ADU_ROOT_B_DEV:-/dev/mmcblk0p3}"
+ADU_DISK_DEVICE="${ADU_DISK_DEVICE:-/dev/mmcblk0}"
+
 # Shared lock file for U-Boot environment access
 UBOOT_LOCK_FILE="/var/lock/adu-uboot-env.lock"
 # State directory for update tracking
@@ -340,9 +352,9 @@ initialize_partitions() {
     
     # Safety check: verify U-Boot boot_partition matches actual root partition
     local actual_root=""
-    if grep -q "root=/dev/mmcblk0p2" /proc/cmdline 2>/dev/null; then
+    if grep -q "$ADU_CMDLINE_ROOT_A" /proc/cmdline 2>/dev/null; then
         actual_root="rootA"
-    elif grep -q "root=/dev/mmcblk0p3" /proc/cmdline 2>/dev/null; then
+    elif grep -q "$ADU_CMDLINE_ROOT_B" /proc/cmdline 2>/dev/null; then
         actual_root="rootB"
     fi
     

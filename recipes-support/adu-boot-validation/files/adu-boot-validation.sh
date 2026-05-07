@@ -188,6 +188,22 @@ emit_boot_event() {
 }
 
 # ============================================================================
+# Board Configuration (loaded from /etc/adu/board.conf)
+# ============================================================================
+BOARD_CONF="/etc/adu/board.conf"
+if [[ -f "$BOARD_CONF" ]]; then
+    # shellcheck source=/dev/null
+    . "$BOARD_CONF"
+fi
+
+# Defaults if board.conf is missing (backward compat with RPi)
+ADU_CMDLINE_ROOT_A="${ADU_CMDLINE_ROOT_A:-root=/dev/mmcblk0p2}"
+ADU_CMDLINE_ROOT_B="${ADU_CMDLINE_ROOT_B:-root=/dev/mmcblk0p3}"
+ADU_ROOT_A_DEV="${ADU_ROOT_A_DEV:-/dev/mmcblk0p2}"
+ADU_ROOT_B_DEV="${ADU_ROOT_B_DEV:-/dev/mmcblk0p3}"
+ADU_DISK_DEVICE="${ADU_DISK_DEVICE:-/dev/mmcblk0}"
+
+# ============================================================================
 # Phase 1: Rollback Detection Functions
 # ============================================================================
 
@@ -212,9 +228,9 @@ ensure_directories() {
 
 # Get current partition from kernel command line
 get_current_partition() {
-    if grep -q "root=/dev/mmcblk0p2" /proc/cmdline; then
+    if grep -q "$ADU_CMDLINE_ROOT_A" /proc/cmdline; then
         echo "rootA"
-    elif grep -q "root=/dev/mmcblk0p3" /proc/cmdline; then
+    elif grep -q "$ADU_CMDLINE_ROOT_B" /proc/cmdline; then
         echo "rootB"
     else
         error_phase1 "Unknown root partition in /proc/cmdline"

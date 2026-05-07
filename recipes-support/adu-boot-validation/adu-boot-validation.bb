@@ -31,6 +31,7 @@ RDEPENDS:${PN} = " \
     coreutils \
     grep \
     findutils \
+    adu-board-config \
 "
 
 # Inherit useradd to ensure adu user exists (needed for state directory ownership)
