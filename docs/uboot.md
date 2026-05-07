@@ -475,3 +475,94 @@ reboot
 
 - [U-Boot Documentation](https://u-boot.readthedocs.io/)
 - [Raspberry Pi U-Boot](https://github.com/u-boot/u-boot/tree/master/board/raspberrypi)
+
+## Boot Event Log (Diagnostics)
+
+All boot lifecycle events are recorded to a structured JSON-lines log file at:
+
+```
+/var/lib/adu/states/boot-events.log
+```
+
+Each line is a self-contained JSON object with a timestamp, boot session ID, event name, and optional detail payload. This provides a single file to trace the full history of boots, updates, rollbacks, and failures.
+
+### Events Reference
+
+| Event | Source | Description |
+|-------|--------|-------------|
+| `phase1_start` | boot-validation | Validation service started, shows `upgrade_available` state |
+| `boot_partition_detected` | boot-validation | Which partition booted, current `boot_attempts` and `boot_result` |
+| `stable_boot_confirmed` | boot-validation | Normal (non-upgrade) boot, counters reset to 0 |
+| `post_rollback_boot` | boot-validation | First boot after U-Boot performed a rollback |
+| `rollback_detected` | boot-validation | Phase 1 confirmed rollback; includes `workflow_id`, partitions |
+| `flapping_detected` | boot-validation | Partition switching too rapidly (within window) |
+| `phase2_safe_mode` | boot-validation | Health checks running in degraded mode (post-rollback) |
+| `validation_failed` | boot-validation | Critical health check failures; includes failure list |
+| `validation_success` | boot-validation | All checks passed; boot confirmed |
+| `reboot_triggered` | boot-validation | System rebooting for retry/rollback; includes attempt count |
+| `update_applied` | yocto-a-b-update | A/B update applied; includes `workflow_id`, target/previous partition |
+| `agent_restart_attempt` | agent-watchdog | Watchdog restarting the ADU agent; includes attempt number |
+| `agent_restart_success` | agent-watchdog | Agent recovered after restart |
+| `agent_restart_failed` | agent-watchdog | Agent failed to start after restart |
+| `agent_max_restarts_exceeded` | agent-watchdog | Watchdog triggering reboot (agent unrecoverable) |
+
+### Querying the Log
+
+```bash
+# View all events (pretty-printed)
+cat /var/lib/adu/states/boot-events.log | jq .
+
+# Show only failures and reboots
+grep -E '"(validation_failed|reboot_triggered|rollback_detected|agent_max)"' \
+  /var/lib/adu/states/boot-events.log | jq .
+
+# Show all events from a specific boot session
+grep '"boot_id":"<first-8-chars-of-boot-id>"' \
+  /var/lib/adu/states/boot-events.log | jq .
+
+# Show last 5 events
+tail -5 /var/lib/adu/states/boot-events.log | jq .
+
+# Timeline of a failed update
+grep -E '"(update_applied|phase1_start|validation_|reboot_|rollback_)"' \
+  /var/lib/adu/states/boot-events.log | jq -r '[.ts, .event, .detail.partition // .detail.target_partition // ""] | join(" | ")'
+```
+
+### Log Rotation
+
+The log auto-rotates at 500 lines (~50KB). Oldest entries are dropped. All writes are non-blocking — logging failures never affect boot behavior.
+
+## Agent Watchdog
+
+The `adu-agent-watchdog.timer` monitors the ADU agent service health after boot:
+
+- **Check interval**: Every 5 minutes (after 2-minute initial delay)
+- **On agent down**: Attempts restart (up to 3 times)
+- **After 3 failures**: Triggers system reboot (U-Boot increments `boot_attempts`)
+- **On agent healthy**: Resets restart counter to 0
+
+This ensures that if an update breaks the ADU agent, the system will eventually exhaust `boot_attempts` and U-Boot will rollback to the last known good partition.
+
+### Watchdog → Rollback Flow
+
+```
+Agent crashes → Watchdog restarts (×3) → Reboot → U-Boot increments boot_attempts
+                                                  → Watchdog restarts (×3) → Reboot → ...
+                                                  → After 5 reboots: U-Boot rolls back to LKG
+```
+
+### Managing the Watchdog
+
+```bash
+# Check watchdog status
+systemctl status adu-agent-watchdog.timer
+
+# View restart count
+cat /var/lib/adu/states/agent_restart_count
+
+# Disable watchdog temporarily
+systemctl stop adu-agent-watchdog.timer
+
+# View watchdog events
+grep '"agent_"' /var/lib/adu/states/boot-events.log | jq .
+```
