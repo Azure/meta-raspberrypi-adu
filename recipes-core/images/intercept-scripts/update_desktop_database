@@ -1,0 +1,3 @@
+#!/bin/sh
+# No-op: not needed for embedded IoT images
+exit 0

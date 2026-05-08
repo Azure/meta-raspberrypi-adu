@@ -50,6 +50,13 @@ WKS_FILE:raspberrypi4 = "adu-raspberrypi.wks"
 # Generate both wic.gz (for SD card flashing) and ext4.gz (for OTA updates)
 IMAGE_FSTYPES = "ext4.gz wic.gz wic.bmap"
 
+# Suppress recommended packages to reduce image size
+NO_RECOMMENDATIONS = "1"
+
+# Override postinstall intercept scripts with no-ops to avoid cross-arch failures
+# (update_mime_database, update_udev_hwdb, etc. fail when building aarch64 rootfs on x86_64)
+POSTINST_INTERCEPTS_DIR = "${THISDIR}/intercept-scripts"
+
 # Add extra 256M to ensure enough space for future update payloads.
 IMAGE_ROOTFS_EXTRA_SPACE = "262144"
 
@@ -89,7 +96,7 @@ IMAGE_INSTALL += " \
     u-boot-fw-utils \
     python3 \
     python3-modules \
-    bsdiff \
+    ${@bb.utils.contains('WITH_FEATURE_DELTA_UPDATE', '1', 'bsdiff', '', d)} \
     zstd \
     dpkg \
     apt \
