@@ -13,10 +13,23 @@ S = "${WORKDIR}"
 # It's Raspberry Pi specific and separate from the generic ADU agent
 PACKAGE_ARCH = "${MACHINE_ARCH}"
 
+inherit deploy
+
 do_install() {
     install -d ${D}/usr/lib/adu
     install -m 0755 ${WORKDIR}/yocto-a-b-update.sh ${D}/usr/lib/adu/
 }
+
+# Also publish the script to DEPLOY_DIR_IMAGE so packaging recipes
+# (e.g. adu-delta-test-package in meta-azure-device-update-samples) can
+# consume it via an explicit do_deploy dependency without scraping a
+# rootfs. Mirrors the same task in meta-azure-device-update-bsp's copy
+# of this recipe so adu-delta-test-package works on either layer set.
+do_deploy() {
+    install -d ${DEPLOYDIR}
+    install -m 0755 ${WORKDIR}/yocto-a-b-update.sh ${DEPLOYDIR}/yocto-a-b-update.sh
+}
+addtask do_deploy after do_install before do_build
 
 FILES:${PN} = "/usr/lib/adu/yocto-a-b-update.sh"
 
