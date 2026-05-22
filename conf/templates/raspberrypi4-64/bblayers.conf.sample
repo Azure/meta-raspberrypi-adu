@@ -11,9 +11,11 @@ BBLAYERS ?= " \
   ##OEROOT##/../meta-openembedded/meta-multimedia \
   ##OEROOT##/../meta-openembedded/meta-networking \
   ##OEROOT##/../meta-openembedded/meta-python \
+  ##OEROOT##/../meta-clang \
   ##OEROOT##/../meta-raspberrypi \
   ##OEROOT##/../meta-swupdate \
   ##OEROOT##/../meta-iot-hub-device-update-delta \
   ##OEROOT##/../meta-azure-device-update \
+  ##OEROOT##/../meta-azure-device-update-samples \
   ##OEROOT##/../meta-raspberrypi-adu \
   "

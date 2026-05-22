@@ -9,6 +9,11 @@ LICENSE="CLOSED"
 
 DEPENDS += "adu-base-image swupdate"
 
+# Explicit dependency: SWU generation depends on base image
+# This ensures BitBake rebuilds .swu files when base image changes
+do_swuimage[depends] += "adu-base-image:do_image_complete"
+do_swuimage[deptask] += "do_packagedata"
+
 SRC_URI = " \
     file://sw-description \
 "

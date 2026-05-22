@@ -1,0 +1,338 @@
+#!/bin/bash
+# ADU Health Check - Comprehensive validation that doesn't exit early
+# This script validates all ADU components and reports all failures at once
+
+set +e  # Don't exit on errors - collect all failures
+
+VERSION="1.0.0"
+FAILED_CHECKS=0
+PASSED_CHECKS=0
+WARNING_CHECKS=0
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+check_pass() {
+    echo -e "${GREEN}✓ PASS${NC}: $1"
+    ((PASSED_CHECKS++))
+}
+
+check_fail() {
+    echo -e "${RED}✗ FAIL${NC}: $1"
+    ((FAILED_CHECKS++))
+}
+
+check_warn() {
+    echo -e "${YELLOW}⚠ WARN${NC}: $1"
+    ((WARNING_CHECKS++))
+}
+
+print_info() {
+    echo -e "${BLUE}ℹ INFO${NC}: $1"
+}
+
+echo "========================================="
+echo "  ADU Health Check v${VERSION}"
+echo "  $(date)"
+echo "========================================="
+echo ""
+
+# Check if running as root (needed for accurate checks)
+if [ "$EUID" -ne 0 ] && [ "$(id -u)" -ne 0 ]; then
+    check_warn "Not running as root. Some checks may be incomplete."
+    echo ""
+fi
+
+# 1. Check /adu partition
+echo "=== /adu Partition ==="
+if mountpoint -q /adu 2>/dev/null; then
+    check_pass "/adu is mounted"
+    
+    # Check if writable
+    if touch /adu/.health-check-test 2>/dev/null; then
+        check_pass "/adu is writable"
+        rm -f /adu/.health-check-test
+    else
+        check_fail "/adu is NOT writable (read-only mount?)"
+    fi
+    
+    # Check ownership
+    adu_owner=$(stat -c '%U:%G' /adu 2>/dev/null)
+    if [ "$adu_owner" = "adu:adu" ]; then
+        check_pass "/adu ownership is adu:adu"
+    else
+        check_fail "/adu ownership is $adu_owner (expected adu:adu)"
+    fi
+else
+    check_fail "/adu is NOT mounted"
+fi
+
+# 2. Check required directories
+echo ""
+echo "=== Required Directories ==="
+required_dirs=(
+    "/adu/conf:adu:adu"
+    "/adu/logs:adu:adu"
+    "/adu/data:adu:adu"
+    "/adu/data/downloads:adu:adu"
+    "/adu/data/extensions:adu:adu"
+    "/adu/data/states:adu:adu"
+    "/adu/data/sdc:adu:adu"
+)
+
+for dir_spec in "${required_dirs[@]}"; do
+    dir="${dir_spec%%:*}"
+    expected_owner="${dir_spec#*:}"
+    
+    if [ -d "$dir" ]; then
+        actual_owner=$(stat -c '%U:%G' "$dir" 2>/dev/null)
+        if [ "$actual_owner" = "$expected_owner" ]; then
+            check_pass "$dir exists with correct ownership ($expected_owner)"
+        else
+            check_fail "$dir has wrong ownership: $actual_owner (expected $expected_owner)"
+        fi
+    else
+        check_fail "$dir does NOT exist"
+    fi
+done
+
+# Special check for /adu/conf permissions (must be 0750)
+if [ -d "/adu/conf" ]; then
+    conf_perms=$(stat -c '%a' /adu/conf 2>/dev/null)
+    if [ "$conf_perms" = "750" ]; then
+        check_pass "/adu/conf has correct permissions (0750)"
+    else
+        check_fail "/adu/conf has wrong permissions: $conf_perms (expected 0750)"
+    fi
+fi
+
+# 3. Check symlinks
+echo ""
+echo "=== Symlinks ==="
+symlinks=(
+    "/etc/adu:/adu/conf"
+    "/var/log/adu:/adu/logs"
+)
+
+for symlink_spec in "${symlinks[@]}"; do
+    link="${symlink_spec%%:*}"
+    expected_target="${symlink_spec#*:}"
+    
+    if [ -L "$link" ]; then
+        actual_target=$(readlink "$link")
+        if [ "$actual_target" = "$expected_target" ]; then
+            check_pass "$link → $expected_target (correct)"
+        else
+            check_fail "$link → $actual_target (expected $expected_target)"
+        fi
+    else
+        check_fail "$link is NOT a symlink"
+    fi
+done
+
+# 4. Check bind mounts for /var/lib/adu
+echo ""
+echo "=== /var/lib/adu Bind Mounts ==="
+bind_mounts=(
+    "/var/lib/adu/downloads"
+    "/var/lib/adu/extensions"
+    "/var/lib/adu/states"
+    "/var/lib/adu/sdc"
+)
+
+for mount_point in "${bind_mounts[@]}"; do
+    if mountpoint -q "$mount_point" 2>/dev/null; then
+        check_pass "$mount_point is mounted"
+    elif [ -d "$mount_point" ]; then
+        check_warn "$mount_point exists but is NOT mounted (overlay service may not be running)"
+    else
+        check_fail "$mount_point does NOT exist"
+    fi
+done
+
+# 5. Check users and groups
+echo ""
+echo "=== Users & Groups ==="
+if id adu &>/dev/null; then
+    adu_uid=$(id -u adu 2>/dev/null)
+    adu_gid=$(id -g adu 2>/dev/null)
+    if [ "$adu_uid" = "800" ] && [ "$adu_gid" = "800" ]; then
+        check_pass "adu user exists (UID:GID 800:800)"
+    else
+        check_warn "adu user exists but UID:GID is ${adu_uid}:${adu_gid} (expected 800:800)"
+    fi
+    
+    # Check if adu is member of do group
+    if id do &>/dev/null; then
+        if id -nG adu 2>/dev/null | grep -qw do; then
+            check_pass "adu user is member of 'do' group"
+        else
+            check_fail "adu user is NOT a member of 'do' group (required for downloads)"
+        fi
+    else
+        print_info "do group does not exist (delivery optimization not installed)"
+    fi
+else
+    check_fail "adu user does NOT exist"
+fi
+
+if id do &>/dev/null; then
+    do_uid=$(id -u do 2>/dev/null)
+    do_gid=$(id -g do 2>/dev/null)
+    if [ "$do_uid" = "801" ] && [ "$do_gid" = "801" ]; then
+        check_pass "do user exists (UID:GID 801:801)"
+    else
+        check_warn "do user exists but UID:GID is ${do_uid}:${do_gid} (expected 801:801)"
+    fi
+    
+    # Check if do is member of adu group
+    if id -nG do 2>/dev/null | grep -qw adu; then
+        check_pass "do user is member of 'adu' group"
+    else
+        check_fail "do user is NOT a member of 'adu' group (required for saving downloads)"
+    fi
+else
+    print_info "do user does not exist (delivery optimization not installed)"
+fi
+
+# 6. Check ADU Agent Binary
+echo ""
+echo "=== ADU Agent Binary ==="
+if [ -x "/usr/bin/AducIotAgent" ]; then
+    check_pass "AducIotAgent binary found and executable"
+else
+    check_fail "AducIotAgent binary NOT found or not executable"
+fi
+
+# 7. Check du-config.json
+echo ""
+echo "=== ADU Configuration ==="
+config_paths=(
+    "/adu/conf/du-config.json"
+    "/etc/adu/du-config.json"
+)
+
+config_found=""
+for config in "${config_paths[@]}"; do
+    if [ -f "$config" ]; then
+        config_found="$config"
+        check_pass "du-config.json found at $config"
+        break
+    fi
+done
+
+if [ -z "$config_found" ]; then
+    check_fail "du-config.json NOT found"
+else
+    # Validate JSON syntax
+    if command -v python3 &>/dev/null; then
+        if python3 -c "import json; json.load(open('$config_found'))" 2>/dev/null; then
+            check_pass "du-config.json has valid JSON syntax"
+        else
+            check_fail "du-config.json has INVALID JSON syntax"
+            echo "  Error details:"
+            python3 -c "import json; json.load(open('$config_found'))" 2>&1 | sed 's/^/    /'
+        fi
+    fi
+    
+    # Check for placeholder values
+    if grep -q "placeholder.azure-devices.net" "$config_found" 2>/dev/null; then
+        check_warn "Using placeholder IoT Hub (needs real connection string for production)"
+    elif grep -q "<YOUR_DEVICE_CONNECTION_STRING>" "$config_found" 2>/dev/null; then
+        check_fail "Connection string still has template placeholder"
+    elif grep -q "HostName=.*azure-devices.net" "$config_found" 2>/dev/null; then
+        check_pass "Connection string appears configured"
+    else
+        check_warn "Connection string format unclear"
+    fi
+    
+    # Check required fields
+    required_fields=("schemaVersion" "aduShellTrustedUsers" "manufacturer" "model" "agents")
+    for field in "${required_fields[@]}"; do
+        if grep -q "\"$field\"" "$config_found" 2>/dev/null; then
+            check_pass "Required field '$field' is present"
+        else
+            check_fail "Required field '$field' is MISSING"
+        fi
+    done
+fi
+
+# 8. Check systemd services
+echo ""
+echo "=== Systemd Services ==="
+services=(
+    "adu.mount"
+    "adu-filesystem-layout.service"
+    "adu-oobe.service"
+    "adu-persistent-overlay.service"
+    "deviceupdate-agent.service"
+    "deliveryoptimization-agent.service"
+)
+
+for service in "${services[@]}"; do
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+        check_pass "$service is active"
+    elif systemctl is-enabled --quiet "$service" 2>/dev/null; then
+        check_warn "$service is enabled but NOT active"
+    else
+        check_fail "$service is NOT active"
+    fi
+done
+
+# 9. Check file permissions
+echo ""
+echo "=== File Permissions ==="
+if [ -f "/usr/bin/adu-shell" ]; then
+    perms=$(stat -c '%a' /usr/bin/adu-shell 2>/dev/null)
+    owner=$(stat -c '%U:%G' /usr/bin/adu-shell 2>/dev/null)
+    if [ "$perms" = "4750" ] || [ "$perms" = "4755" ]; then
+        check_pass "adu-shell has setuid bit ($perms $owner)"
+    else
+        check_fail "adu-shell missing setuid bit ($perms $owner, expected 4750 or 4755)"
+    fi
+else
+    check_fail "adu-shell NOT found at /usr/bin/adu-shell"
+fi
+
+# 10. Check disk space
+echo ""
+echo "=== Disk Space ==="
+adu_usage=$(df -h /adu 2>/dev/null | awk 'NR==2 {print $5}' | tr -d '%')
+if [ -n "$adu_usage" ] && [ "$adu_usage" -eq "$adu_usage" ] 2>/dev/null; then
+    if [ "$adu_usage" -lt 80 ]; then
+        check_pass "/adu partition usage: ${adu_usage}%"
+    elif [ "$adu_usage" -lt 90 ]; then
+        check_warn "/adu partition usage: ${adu_usage}% (getting full)"
+    else
+        check_fail "/adu partition usage: ${adu_usage}% (critically full)"
+    fi
+else
+    check_warn "Cannot determine /adu partition usage"
+fi
+
+# Summary
+echo ""
+echo "========================================="
+echo "  Health Check Summary"
+echo "========================================="
+echo -e "${GREEN}Passed:${NC}   $PASSED_CHECKS"
+echo -e "${YELLOW}Warnings:${NC} $WARNING_CHECKS"
+echo -e "${RED}Failed:${NC}   $FAILED_CHECKS"
+echo ""
+
+if [ $FAILED_CHECKS -eq 0 ] && [ $WARNING_CHECKS -eq 0 ]; then
+    echo -e "${GREEN}✓ All checks passed - system is healthy${NC}"
+    exit 0
+elif [ $FAILED_CHECKS -eq 0 ]; then
+    echo -e "${YELLOW}⚠ System operational with warnings${NC}"
+    echo "Run 'adu-diag' for detailed diagnostics and logs"
+    exit 2
+else
+    echo -e "${RED}✗ System has $FAILED_CHECKS failed check(s)${NC}"
+    echo "Run 'adu-diag' for detailed diagnostics"
+    exit 1
+fi

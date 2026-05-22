@@ -25,7 +25,7 @@
 #MACHINE ?= "qemux86"
 #MACHINE ?= "qemux86-64"
 #
-# There are also the following hardware board target machines included for 
+# There are also the following hardware board target machines included for
 # demonstration purposes:
 #
 #MACHINE ?= "beaglebone-yocto"
@@ -83,12 +83,12 @@ TMPDIR  = "${TOPDIR}/build/tmp"
 #
 # The distribution setting controls which policy settings are used as defaults.
 # The default value is fine for general Yocto project use, at least initially.
-# Ultimately when creating custom policy, people will likely end up subclassing 
+# Ultimately when creating custom policy, people will likely end up subclassing
 # these defaults.
 #
 DISTRO ?= "poky"
 # As an example of a subclass there is a "bleeding" edge policy configuration
-# where many versions are set to the absolute latest code from the upstream 
+# where many versions are set to the absolute latest code from the upstream
 # source control systems. This is just mentioned here as an example, its not
 # useful to most new users.
 # DISTRO ?= "poky-bleeding"
@@ -240,7 +240,7 @@ BB_DISKMON_DIRS ??= "\
 # By default native qemu will build with a builtin VNC server where graphical output can be
 # seen. The line below enables the SDL UI frontend too.
 PACKAGECONFIG:append:pn-qemu-system-native = " sdl"
-# By default libsdl2-native will be built, if you want to use your host's libSDL instead of 
+# By default libsdl2-native will be built, if you want to use your host's libSDL instead of
 # the minimal libsdl built by libsdl2-native then uncomment the ASSUME_PROVIDED line below.
 #ASSUME_PROVIDED += "libsdl2-native"
 
@@ -289,4 +289,15 @@ DISTRO_FEATURES_BACKFILL_CONSIDERED += "sysvinit"
 VIRTUAL-RUNTIME_init_manager = "systemd"
 VIRTUAL-RUNTIME_initscripts = "systemd-compat-units"
 
-LICENSE_FLAGS_ACCEPTED = "synaptics-killswitch"
+# WiFi/Bluetooth license acceptance is handled conditionally by conf/distro/adu-wifi-bluetooth.conf
+# based on ENABLE_WIFI_BLUETOOTH variable (disabled by default)
+# Do not unconditionally accept the license here as it causes BitBake to fetch
+# proprietary firmware packages even when WiFi/Bluetooth is disabled
+
+# Pass through ADU-specific environment variables from build.sh to BitBake
+BB_ENV_PASSTHROUGH_ADDITIONS += "ADU_ROOT_PASSWD"
+
+# Virtual provider configuration
+# meta-azure-device-update-samples uses virtual/adu-base-image
+# This layer (meta-raspberrypi-adu) provides the implementation
+PREFERRED_PROVIDER_virtual/adu-base-image = "adu-base-image"

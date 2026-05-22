@@ -1,0 +1,51 @@
+# ADU Partition Setup Service
+#
+# DEPRECATION NOTICE:
+# This service is now superseded by adu-oobe.service (in meta-azure-device-update).
+# The adu-oobe.service handles mount point ownership along with directory structure setup.
+# 
+# This service is kept for backward compatibility but may be removed in future releases.
+# If adu-oobe.service is present, this service becomes redundant.
+#
+# Migration path:
+# 1. Ensure meta-azure-device-update includes adu-oobe.service
+# 2. This service can be safely removed from meta-raspberrypi-adu
+# 3. adu-oobe.service will handle all /adu setup tasks
+#
+# This service sets the correct ownership and permissions on the /adu partition
+# after it has been mounted by systemd (via the auto-generated adu.mount unit).
+#
+# The /adu partition is used by Azure Device Update (ADU) for:
+#   - Configuration files
+#   - Update logs and telemetry
+#   - Delta update staging area
+#   - Swap file for memory-constrained operations
+#
+# UID/GID 800:800 corresponds to the 'adu' user and group created by the
+# azure-device-update recipe. This mapping is defined in:
+#   meta-azure-device-update/recipes-azure-device-update/azure-device-update/azure-device-update_git.bb
+#
+# IMPORTANT: If you change the UID/GID in azure-device-update_git.bb, you MUST
+# update the following files to maintain consistency:
+#   1. This file (adu-setup.service) - chown command below
+#   2. meta-raspberrypi-adu/wic/adu-raspberrypi.wks - if using vfat with uid/gid options
+#   3. meta-raspberrypi-adu/recipes-core/base-files/base-files/*/fstab - if using vfat with uid/gid options
+#
+# Current user/group mappings:
+#   adu  (uid=800, gid=800) - Azure Device Update agent
+#   do   (uid=801, gid=801) - Delivery Optimization agent
+#
+[Unit]
+Description=Set ADU partition ownership and permissions
+After=adu.mount
+Requires=adu.mount
+Before=adu-swap.service adu-boot-validation.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/chown 800:800 /adu
+ExecStart=/bin/chmod 770 /adu
+
+[Install]
+WantedBy=multi-user.target

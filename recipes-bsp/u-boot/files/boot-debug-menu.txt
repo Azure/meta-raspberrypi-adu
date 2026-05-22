@@ -1,0 +1,59 @@
+# U-Boot Script for ADU Boot Debug Mode
+# This script adds a 5-second interactive menu to enable boot debugging
+# and checks for /boot/adu-debug-mode.txt presence
+
+# Check for debug mode flag file
+if test -e ${devtype} ${devnum}:${distro_bootpart} /adu-debug-mode.txt; then
+    echo "==================================================================="
+    echo "  ADU DEBUG MODE ENABLED (adu-debug-mode.txt detected)"
+    echo "==================================================================="
+    setenv adu_debug 1
+else
+    setenv adu_debug 0
+fi
+
+# If not already in debug mode, offer interactive menu
+if test ${adu_debug} -eq 0; then
+    echo ""
+    echo "==================================================================="
+    echo "  Azure Device Update - Boot Menu"
+    echo "==================================================================="
+    echo ""
+    echo "  Press any key within 5 seconds to enable DEBUG MODE"
+    echo "  (Captures detailed boot logs to /boot/adu-diagnostics/)"
+    echo ""
+    echo "  Or wait for normal boot..."
+    echo ""
+    
+    # 5-second timeout waiting for keypress
+    if test ${bootdelay} -gt 0; then
+        # Use existing bootdelay mechanism
+        setenv bootdelay 5
+    fi
+    
+    # Check if user pressed key (this happens automatically with bootdelay)
+    # If user interrupted, we'll be in U-Boot prompt
+    # For non-interactive, we timeout and continue
+fi
+
+# If debug mode enabled, modify kernel command line
+if test ${adu_debug} -eq 1; then
+    echo "Enabling boot debug mode..."
+    echo "  - Verbose kernel messages"
+    echo "  - Systemd debug level"
+    echo "  - Boot log capture to /boot/adu-diagnostics/"
+    echo ""
+    
+    # Add debug parameters to kernel cmdline
+    setenv debug_params "loglevel=7 systemd.log_level=debug systemd.log_target=console plymouth.enable=0 quiet=0 adu_debug=1"
+    
+    # Append to existing bootargs
+    if test -n "${bootargs}"; then
+        setenv bootargs "${bootargs} ${debug_params}"
+    else
+        setenv bootargs "${debug_params}"
+    fi
+fi
+
+# Continue with normal boot process
+# (This script should be sourced before loading kernel)

@@ -1,0 +1,260 @@
+===============================================================================
+  AZURE DEVICE UPDATE - GETTING STARTED GUIDE
+===============================================================================
+
+Welcome! This guide will help you set up your Azure Device Update (ADU)
+enabled device and connect it to Azure IoT Hub.
+
+===============================================================================
+  QUICK START CHECKLIST
+===============================================================================
+
+□ 1. Connect to WiFi (if using wireless)
+□ 2. Configure Azure IoT Hub connection
+□ 3. Start ADU Agent
+□ 4. Verify connection to IoT Hub
+□ 5. Deploy your first update
+
+===============================================================================
+  STEP 1: CONNECT TO WIFI
+===============================================================================
+
+OPTION A - Interactive WiFi Setup (Recommended)
+------------------------------------------------
+Run the interactive WiFi setup script:
+
+    sudo adu-wifi-setup.sh
+
+This script will guide you through:
+  • Enabling WiFi
+  • Scanning for networks
+  • Connecting to your network
+  • Verifying connection
+
+OPTION B - Manual WiFi Setup
+-----------------------------
+Use connmanctl commands directly:
+
+    # Enable WiFi and scan for networks
+    sudo connmanctl enable wifi
+    sudo connmanctl scan wifi
+    sleep 2
+    
+    # List available networks
+    sudo connmanctl services
+    
+    # Connect to your network (replace <service_id> with your network)
+    sudo connmanctl agent on
+    sudo connmanctl connect wifi_<service_id>
+    # Enter your WiFi password when prompted
+
+OPTION C - Wired Ethernet
+--------------------------
+If using Ethernet cable, connection should be automatic via DHCP.
+Verify with: ip addr show eth0
+
+===============================================================================
+  STEP 2: CONFIGURE AZURE IOT HUB CONNECTION
+===============================================================================
+
+You need one of the following from Azure Portal:
+  • Device connection string (easiest for testing)
+  • Device Provisioning Service (DPS) credentials (recommended for production)
+  • Azure IoT Identity Service (AIS) - advanced scenario
+
+METHOD A - Connection String (Quick Test)
+------------------------------------------
+1. Get your device connection string from Azure Portal:
+   IoT Hub > Devices > [Your Device] > Primary Connection String
+
+2. Edit the ADU configuration file:
+   sudo nano /adu/conf/du-config.json
+
+3. Find the "connectionData" field and paste your connection string:
+   {
+     "schemaVersion": "1.1",
+     "aduShellTrustedUsers": ["adu", "do"],
+     "manufacturer": "<your-manufacturer>",
+     "model": "<your-model>",
+     "agents": [
+       {
+         "name": "main",
+         "runas": "adu",
+         "connectionSource": {
+           "connectionType": "string",
+           "connectionData": "HostName=<your-hub>.azure-devices.net;DeviceId=<device-id>;SharedAccessKey=<key>"
+         }
+       }
+     ]
+   }
+
+4. Save and exit (Ctrl+X, then Y, then Enter)
+
+METHOD B - Device Provisioning Service (Production)
+----------------------------------------------------
+1. Get DPS credentials from Azure Portal:
+   - Scope ID
+   - Registration ID  
+   - Symmetric Key or X.509 certificate
+
+2. Edit /adu/conf/du-config.json and configure connectionSource:
+   "connectionSource": {
+     "connectionType": "AIS",
+     "connectionData": "iotedge"
+   }
+
+3. Configure Azure IoT Identity Service separately
+   (See: /usr/share/doc/azure-iot-identity-service/)
+
+===============================================================================
+  STEP 3: START ADU AGENT
+===============================================================================
+
+Start the Azure Device Update agent:
+
+    sudo systemctl start deviceupdate-agent.service
+
+Enable automatic start on boot:
+
+    sudo systemctl enable deviceupdate-agent.service
+
+Check agent status:
+
+    sudo systemctl status deviceupdate-agent.service
+
+View live logs:
+
+    sudo journalctl -u deviceupdate-agent.service -f
+
+===============================================================================
+  STEP 4: VERIFY CONNECTION
+===============================================================================
+
+1. Check agent logs for successful connection:
+   sudo journalctl -u deviceupdate-agent.service -n 50
+
+   Look for messages like:
+   - "Connected to IoT Hub"
+   - "Device twin retrieved"
+   - "Waiting for updates..."
+
+2. Verify in Azure Portal:
+   IoT Hub > Devices > [Your Device]
+   
+   Status should show: "Connected"
+   Last activity should show recent timestamp
+
+3. Check network connectivity:
+   ping -c 4 8.8.8.8                    # Internet connectivity
+   ping -c 4 <your-hub>.azure-devices.net  # IoT Hub connectivity
+
+===============================================================================
+  STEP 5: DEPLOY YOUR FIRST UPDATE
+===============================================================================
+
+1. Prepare an update package (SWU file)
+   - Build using Yocto or use provided samples
+   - Upload to Azure Storage Account
+
+2. Import update to ADU:
+   Azure Portal > Device Update for IoT Hub > Updates > Import
+
+3. Create deployment:
+   Updates > [Your Update] > Create Deployment
+   - Select target device or group
+   - Set deployment schedule
+
+4. Monitor deployment progress:
+   - Azure Portal: Deployments tab shows status
+   - Device logs: sudo journalctl -u deviceupdate-agent.service -f
+
+===============================================================================
+  TROUBLESHOOTING
+===============================================================================
+
+WiFi Not Connecting
+-------------------
+- Run diagnostics: sudo adu-wifi-diagnostics.sh
+- Check output: cat /boot/adu-diags/wifi-diag-*.txt
+- Verify credentials: sudo connmanctl services
+
+ADU Agent Not Starting
+----------------------
+- Check configuration: sudo cat /adu/conf/du-config.json
+- Verify ownership: ls -la /adu/conf/
+- Check logs: sudo journalctl -u deviceupdate-agent.service -n 100
+
+Connection String Issues
+------------------------
+- Ensure no extra spaces or line breaks in connection string
+- Verify device exists in IoT Hub (Azure Portal)
+- Check SAS key hasn't expired
+- Verify network connectivity to Azure
+
+Permission Errors
+-----------------
+- Check ADU directories: ls -la /adu/
+- Verify adu user exists: id adu
+- Run health check: sudo systemctl status adu-oobe.service
+
+Boot Diagnostics
+----------------
+If device fails to boot properly:
+1. Remove SD card
+2. Mount boot partition on another PC
+3. Check /boot/adu-diags/ for error logs
+
+===============================================================================
+  USEFUL COMMANDS
+===============================================================================
+
+System Status:
+  sudo systemctl status deviceupdate-agent.service
+  sudo systemctl status adu-oobe.service
+  ip addr show                          # Network interfaces
+  df -h                                 # Disk space
+  
+Network:
+  sudo connmanctl state                 # Connection manager status
+  sudo connmanctl services              # Available networks
+  ping -c 4 8.8.8.8                     # Test internet
+  
+ADU Diagnostics:
+  sudo adu-wifi-diagnostics.sh     # WiFi diagnostics
+  sudo journalctl -u deviceupdate-agent -f     # Live agent logs
+  cat /adu/logs/adu.log                       # ADU log file
+  ls /boot/adu-diags/                   # Boot diagnostics
+
+Configuration:
+  cat /adu/conf/du-config.json          # View ADU config
+  sudo nano /adu/conf/du-config.json    # Edit ADU config
+  
+Updates:
+  ls /var/lib/adu/downloads/            # Downloaded updates
+  cat /adu/data/.adu-update-result      # Last update result
+
+===============================================================================
+  ADDITIONAL RESOURCES
+===============================================================================
+
+Documentation:
+  • Azure Device Update Docs: https://aka.ms/adu-docs
+  • Yocto Project Docs: https://github.com/Azure/iot-hub-device-update-yocto
+  • SWUpdate Manual: https://sbabic.github.io/swupdate/
+
+Support:
+  • GitHub Issues: https://github.com/Azure/iot-hub-device-update/issues
+  • Azure Support: https://azure.microsoft.com/support/
+  • ADU Diagnostics: adu-wifi-diagnostics.sh
+
+Local Documentation:
+  • WiFi Setup: /usr/share/doc/adu/README.txt
+  • Boot Logs: /boot/adu-diags/
+  • System Logs: /var/log/adu/
+
+===============================================================================
+
+Need help? Run: sudo adu-wifi-diagnostics.sh
+Output saved to: /boot/adu-diags/ (accessible from any PC)
+
+===============================================================================

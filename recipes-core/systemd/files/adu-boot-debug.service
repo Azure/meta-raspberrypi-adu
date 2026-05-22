@@ -1,0 +1,53 @@
+[Unit]
+Description=ADU Boot Debug Log Capture
+Documentation=https://github.com/Azure/iot-hub-device-update-yocto
+DefaultDependencies=no
+Before=sysinit.target
+After=systemd-journald.service adu-boot-menu.service
+ConditionPathExists=/run/adu-boot-config
+RequiresMountsFor=/boot
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Check if boot logging is enabled
+ExecStartPre=/bin/sh -c '. /run/adu-boot-config && [ "$BOOT_LOGGING" = "true" ] || exit 0'
+
+# Ensure /boot/adu-diagnostics exists
+ExecStartPre=/bin/mkdir -p /boot/adu-diagnostics
+
+# Capture early boot messages from kernel ring buffer
+ExecStart=/bin/sh -c 'dmesg -T > /boot/adu-diagnostics/rpi-boot-dmesg.log'
+
+# Capture systemd journal from boot
+ExecStart=/bin/sh -c 'journalctl -b -o short-precise > /boot/adu-diagnostics/rpi-boot-journal.log'
+
+# Capture failed units
+ExecStart=/bin/sh -c 'systemctl list-units --state=failed > /boot/adu-diagnostics/rpi-boot-failed-units.log'
+
+# Create a boot summary
+ExecStart=/bin/sh -c 'echo "=== ADU Boot Debug Snapshot ===" > /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "Timestamp: $(date)" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "Boot ID: $(cat /proc/sys/kernel/random/boot_id)" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "Kernel: $(uname -r)" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "Cmdline: $(cat /proc/cmdline)" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "=== Boot Time Analysis ===" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'systemd-analyze >> /boot/adu-diagnostics/rpi-boot-summary.txt 2>&1 || true'
+ExecStart=/bin/sh -c 'echo "" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'echo "=== Critical Path ===" >> /boot/adu-diagnostics/rpi-boot-summary.txt'
+ExecStart=/bin/sh -c 'systemd-analyze critical-chain >> /boot/adu-diagnostics/rpi-boot-summary.txt 2>&1 || true'
+
+# Make files readable
+ExecStartPost=/bin/chmod 644 /boot/adu-diagnostics/rpi-boot-*.log
+ExecStartPost=/bin/chmod 644 /boot/adu-diagnostics/rpi-boot-summary.txt
+
+# Also schedule a final capture after system is fully up
+ExecStartPost=/bin/systemctl start --no-block adu-boot-debug-final.service
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=sysinit.target
