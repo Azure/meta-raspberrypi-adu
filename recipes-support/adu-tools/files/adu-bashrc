@@ -1,0 +1,77 @@
+# ADU Device Custom Bash Configuration
+# This file enhances the user experience with colors, better prompt, and aliases
+
+# If not running interactively, don't do anything
+[[ $- != *i* ]] && return
+
+# Set better terminal capabilities
+export TERM=xterm-256color
+
+# Enable colors
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# Enhanced prompt with color
+# Format: [user@hostname dir]$ 
+if [ "$PS1" ]; then
+    # Check if we have color support
+    if [ -n "$TERM" ] && [ "$TERM" != "dumb" ]; then
+        # Color definitions
+        COLOR_RESET='\[\033[0m\]'
+        COLOR_USER='\[\033[01;32m\]'     # Green for user
+        COLOR_HOST='\[\033[01;34m\]'     # Blue for hostname
+        COLOR_PATH='\[\033[01;36m\]'     # Cyan for path
+        COLOR_PROMPT='\[\033[01;33m\]'   # Yellow for $
+        
+        # Build prompt
+        PS1="${COLOR_USER}\u${COLOR_RESET}@${COLOR_HOST}\h${COLOR_RESET}:${COLOR_PATH}\w${COLOR_PROMPT}\$${COLOR_RESET} "
+    else
+        PS1='[\u@\h \W]\$ '
+    fi
+fi
+
+# Helpful aliases
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+
+# ADU-specific aliases
+alias adu-status='systemctl status deviceupdate-agent'
+alias adu-logs='journalctl -u deviceupdate-agent -f'
+alias adu-config='sudo nano /adu/conf/du-config.json'
+alias wifi-status='iw dev wlan0 link && ip addr show wlan0'
+
+# Show disk space in human-readable format
+alias df='df -h'
+alias du='du -h'
+
+# Safety nets
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+
+# Enable bash completion if available
+if [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+# Set history preferences
+export HISTSIZE=1000
+export HISTFILESIZE=2000
+export HISTCONTROL=ignoredups:erasedups
+
+# Append to history file, don't overwrite
+shopt -s histappend
+
+# Check window size after each command
+shopt -s checkwinsize
+
+# Make less more friendly for non-text input files
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"

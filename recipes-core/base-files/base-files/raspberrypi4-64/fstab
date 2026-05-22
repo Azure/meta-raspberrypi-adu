@@ -19,4 +19,21 @@ tmpfs                /var/volatile        tmpfs      defaults              0  0
 
 # Mount the ADU specific partition for reading configuration and writing logs.
 # This partition is only accessible by adu user/group.
-/dev/mmcblk0p4  /adu    vfat    umask=0027,gid=800,uid=800   0   0
+# ext4 provides proper ACL support and journaling for reliability.
+/dev/mmcblk0p4  /adu    ext4    defaults   0   2
+
+# Optional customer data partition for application-specific storage.
+# FAT32 allows easy cross-platform access.
+# nofail option prevents boot failure if partition is not present.
+#
+# IMPORTANT: This is the 5th partition and requires GPT (GUID Partition Table).
+# MBR (Master Boot Record) only supports 4 primary partitions.
+# To enable this partition:
+#   1. Add 'bootloader --ptable gpt' to wic/adu-raspberrypi.wks
+#   2. Uncomment the line below
+#   3. Test boot on hardware - Raspberry Pi firmware may have limited GPT support
+#
+# WARNING: Partition numbering (/dev/mmcblk0p5) assumes GPT with 5 partitions.
+# With MBR and extended partitions, numbering may differ.
+#
+#/dev/mmcblk0p5  /data   vfat    defaults,nofail   0   0

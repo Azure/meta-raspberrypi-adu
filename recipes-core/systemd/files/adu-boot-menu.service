@@ -1,0 +1,22 @@
+[Unit]
+Description=ADU Interactive Boot Menu
+Documentation=file:///usr/share/doc/adu-boot-menu/README.md
+DefaultDependencies=no
+Before=sysinit.target plymouth-start.service systemd-ask-password-console.path
+After=systemd-vconsole-setup.service
+Conflicts=plymouth-start.service plymouth-quit.service shutdown.target
+ConditionPathExists=!/run/plymouth/pid
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/adu-boot-menu.sh
+StandardInput=tty-force
+StandardOutput=inherit
+StandardError=journal+console
+TTYPath=/dev/console
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+
+[Install]
+WantedBy=sysinit.target

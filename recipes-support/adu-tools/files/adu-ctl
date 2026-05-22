@@ -1,0 +1,520 @@
+#!/bin/bash
+# adu-ctl - ADU Agent Control Tool
+# Convenience wrapper for common ADU agent operations
+
+set -e
+
+VERSION="1.0.0"
+AGENT_SERVICE="deviceupdate-agent.service"
+AGENT_BINARY="/usr/bin/AducIotAgent"
+AGENT_USER="adu"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+print_error() {
+    echo -e "${RED}ERROR:${NC} $*" >&2
+}
+
+print_success() {
+    echo -e "${GREEN}✓${NC} $*"
+}
+
+print_info() {
+    echo -e "${BLUE}ℹ${NC} $*"
+}
+
+print_warn() {
+    echo -e "${YELLOW}⚠${NC} $*"
+}
+
+check_root() {
+    if [ "$EUID" -ne 0 ] && [ "$(id -u)" -ne 0 ]; then
+        print_error "This command requires root privileges"
+        echo "Please run with sudo: sudo adu-ctl $*"
+        exit 1
+    fi
+}
+
+show_usage() {
+    cat << EOF
+adu-ctl v${VERSION} - ADU Agent Control Tool
+
+USAGE:
+    adu-ctl <command> [options]
+
+SERVICE MANAGEMENT:
+    service start          Start the ADU agent service
+    service stop           Stop the ADU agent service
+    service restart        Restart the ADU agent service
+    service reload         Reload the ADU agent service configuration
+    service enable         Enable the ADU agent service (start on boot)
+    service disable        Disable the ADU agent service
+    service status         Show the ADU agent service status
+
+LOGGING:
+    journal [options]      Show systemd journal for ADU agent
+                          Options: -f (follow), -n 100 (last 100 lines), etc.
+    logs                   Show application logs from /var/log/adu/
+    tail [-f]              Tail the latest agent log file
+                          -f: follow mode
+
+AGENT EXECUTION:
+    run [options]          Run AducIotAgent in standalone mode as adu user
+                          Options: -l 0 (log level), -e (extension), etc.
+                          Note: Service must be stopped first
+
+DIAGNOSTICS:
+    health                 Run ADU health check (quick validation)
+    diag [-v] [-o DIR]     Create support bundle for troubleshooting
+                          -v: verbose mode, -o: output directory
+    version                Show ADU agent version
+    config                 Validate du-config.json configuration
+
+STATE MANAGEMENT:
+    clear-blacklist        Remove failed workflows blacklist
+    reset-state            Clear all ADU state files (requires confirmation)
+
+INFORMATION:
+    info                   Show device information (manufacturer, model, version)
+    bootenv                Show U-Boot environment (boot counter, etc.)
+
+GENERAL:
+    help                   Show this help message
+    --version              Show adu-ctl version
+
+EXAMPLES:
+    sudo adu-ctl service restart
+    sudo adu-ctl journal -f
+    sudo adu-ctl run -l 0 -e /tmp/extension
+    adu-ctl health
+    sudo adu-ctl diag -v
+
+EOF
+}
+
+cmd_service() {
+    local action="$1"
+    
+    case "$action" in
+        start|stop|restart|reload|enable|disable)
+            check_root "$@"
+            print_info "Running: systemctl $action $AGENT_SERVICE"
+            if systemctl "$action" "$AGENT_SERVICE"; then
+                print_success "Service $action completed"
+            else
+                print_error "Service $action failed"
+                exit 1
+            fi
+            ;;
+        status)
+            systemctl status "$AGENT_SERVICE"
+            ;;
+        *)
+            print_error "Unknown service action: $action"
+            echo "Valid actions: start, stop, restart, reload, enable, disable, status"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_journal() {
+    shift # Remove 'journal' argument
+    print_info "Showing journal for $AGENT_SERVICE"
+    echo ""
+    journalctl -u "$AGENT_SERVICE" "$@"
+}
+
+cmd_logs() {
+    local log_dir="/var/log/adu"
+    
+    if [ ! -d "$log_dir" ]; then
+        print_warn "Log directory $log_dir does not exist"
+        log_dir="/adu/logs"
+    fi
+    
+    if [ ! -d "$log_dir" ]; then
+        print_error "No ADU log directory found"
+        exit 1
+    fi
+    
+    print_info "ADU application logs in $log_dir:"
+    echo ""
+    
+    if [ -n "$(ls -A "$log_dir" 2>/dev/null)" ]; then
+        ls -lht "$log_dir" | head -20
+        echo ""
+        echo "To view a specific log:"
+        echo "  cat $log_dir/<filename>"
+    else
+        print_warn "No log files found in $log_dir"
+    fi
+}
+
+cmd_tail() {
+    local follow=""
+    if [ "$1" = "-f" ]; then
+        follow="-f"
+    fi
+    
+    local log_dir="/var/log/adu"
+    [ ! -d "$log_dir" ] && log_dir="/adu/logs"
+    
+    if [ ! -d "$log_dir" ]; then
+        print_error "No ADU log directory found"
+        exit 1
+    fi
+    
+    local latest_log=$(ls -t "$log_dir"/*.log 2>/dev/null | head -1)
+    
+    if [ -z "$latest_log" ]; then
+        print_error "No log files found in $log_dir"
+        exit 1
+    fi
+    
+    print_info "Tailing: $latest_log"
+    echo ""
+    tail $follow "$latest_log"
+}
+
+cmd_run() {
+    check_root "$@"
+    shift # Remove 'run' argument
+    
+    # Check if service is running
+    if systemctl is-active --quiet "$AGENT_SERVICE"; then
+        print_error "ADU agent service is running"
+        echo "Stop the service first: sudo adu-ctl service stop"
+        exit 1
+    fi
+    
+    if [ ! -x "$AGENT_BINARY" ]; then
+        print_error "ADU agent binary not found or not executable: $AGENT_BINARY"
+        exit 1
+    fi
+    
+    print_info "Running ADU agent in standalone mode as user '$AGENT_USER'"
+    print_info "Command: sudo -u $AGENT_USER $AGENT_BINARY $*"
+    echo ""
+    
+    # Run as adu user with all arguments
+    exec sudo -u "$AGENT_USER" "$AGENT_BINARY" "$@"
+}
+
+cmd_health() {
+    if command -v adu-health-check &>/dev/null; then
+        print_info "Running ADU health check..."
+        echo ""
+        if [ "$EUID" -eq 0 ] || [ "$(id -u)" -eq 0 ]; then
+            adu-health-check
+        else
+            print_warn "Running without root - some checks may be incomplete"
+            echo ""
+            adu-health-check
+        fi
+    else
+        print_error "adu-health-check not found"
+        exit 1
+    fi
+}
+
+cmd_diag() {
+    if command -v adu-diag &>/dev/null; then
+        print_info "Creating ADU support bundle..."
+        echo ""
+        if [ "$EUID" -eq 0 ] || [ "$(id -u)" -eq 0 ]; then
+            adu-diag "$@"
+        else
+            print_warn "Running without root - some diagnostics may be incomplete"
+            echo "For complete diagnostics: sudo adu-ctl diag $*"
+            echo ""
+            adu-diag "$@"
+        fi
+    else
+        print_error "adu-diag not found"
+        exit 1
+    fi
+}
+
+cmd_version() {
+    print_info "ADU Agent Version:"
+    echo ""
+    
+    if [ -x "$AGENT_BINARY" ]; then
+        if "$AGENT_BINARY" --version 2>/dev/null; then
+            :
+        else
+            # Fallback: extract version from binary
+            strings "$AGENT_BINARY" | grep -i "version" | head -5
+        fi
+    else
+        print_error "ADU agent binary not found: $AGENT_BINARY"
+    fi
+    
+    echo ""
+    print_info "Installed Packages:"
+    dpkg -l | grep -E "azure-device-update|adu" | awk '{print $2, $3}'
+}
+
+cmd_config() {
+    local config_paths=(
+        "/adu/conf/du-config.json"
+        "/etc/adu/du-config.json"
+    )
+    
+    local config_found=""
+    for config in "${config_paths[@]}"; do
+        if [ -f "$config" ]; then
+            config_found="$config"
+            break
+        fi
+    done
+    
+    if [ -z "$config_found" ]; then
+        print_error "du-config.json not found"
+        exit 1
+    fi
+    
+    print_info "Validating: $config_found"
+    echo ""
+    
+    # Check JSON syntax
+    if command -v python3 &>/dev/null; then
+        if python3 -c "import json; json.load(open('$config_found'))" 2>/dev/null; then
+            print_success "JSON syntax is valid"
+        else
+            print_error "JSON syntax is INVALID"
+            python3 -c "import json; json.load(open('$config_found'))" 2>&1
+            exit 1
+        fi
+    else
+        print_warn "python3 not available - cannot validate JSON syntax"
+    fi
+    
+    # Check for placeholder values
+    if grep -q "placeholder.azure-devices.net" "$config_found" 2>/dev/null; then
+        print_warn "Using placeholder IoT Hub hostname"
+    elif grep -q "<YOUR_DEVICE_CONNECTION_STRING>" "$config_found" 2>/dev/null; then
+        print_error "Connection string contains template placeholder"
+        exit 1
+    elif grep -q "HostName=.*azure-devices.net" "$config_found" 2>/dev/null; then
+        print_success "Connection string appears configured"
+    fi
+    
+    # Show key configuration
+    echo ""
+    print_info "Configuration summary:"
+    echo ""
+    
+    if command -v python3 &>/dev/null; then
+        python3 << EOF
+import json
+with open("$config_found") as f:
+    config = json.load(f)
+    print(f"  Schema Version: {config.get('schemaVersion', 'N/A')}")
+    print(f"  Manufacturer: {config.get('manufacturer', 'N/A')}")
+    print(f"  Model: {config.get('model', 'N/A')}")
+    agents = config.get('agents', [])
+    if agents:
+        print(f"  Agents: {len(agents)}")
+        for agent in agents:
+            print(f"    - {agent.get('name', 'unnamed')}: {agent.get('manufacturer', 'N/A')}/{agent.get('model', 'N/A')}")
+EOF
+    else
+        cat "$config_found"
+    fi
+}
+
+cmd_clear_blacklist() {
+    check_root "$@"
+    
+    local blacklist_paths=(
+        "/var/lib/adu/states/failed_workflows.txt"
+        "/adu/data/states/failed_workflows.txt"
+    )
+    
+    local found=0
+    for path in "${blacklist_paths[@]}"; do
+        if [ -f "$path" ]; then
+            print_info "Removing: $path"
+            rm -f "$path"
+            found=1
+        fi
+    done
+    
+    if [ $found -eq 0 ]; then
+        print_info "No failed workflows blacklist found"
+    else
+        print_success "Failed workflows blacklist cleared"
+        print_info "Restart agent to apply: sudo adu-ctl service restart"
+    fi
+}
+
+cmd_reset_state() {
+    check_root "$@"
+    
+    print_warn "This will delete ALL ADU state files!"
+    echo "  - Workflow states"
+    echo "  - Downloaded updates"
+    echo "  - Failed workflows blacklist"
+    echo ""
+    read -p "Are you sure? [y/N] " -n 1 -r
+    echo
+    
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        print_info "Cancelled"
+        exit 0
+    fi
+    
+    # Stop service first
+    print_info "Stopping ADU agent service..."
+    systemctl stop "$AGENT_SERVICE" 2>/dev/null || true
+    
+    # Clear state directories
+    local state_paths=(
+        "/var/lib/adu/states/*"
+        "/var/lib/adu/downloads/*"
+        "/adu/data/states/*"
+        "/adu/data/downloads/*"
+    )
+    
+    for path in "${state_paths[@]}"; do
+        if ls $path 2>/dev/null | grep -q .; then
+            print_info "Clearing: $path"
+            rm -rf $path
+        fi
+    done
+    
+    print_success "ADU state cleared"
+    print_info "Start agent to resume: sudo adu-ctl service start"
+}
+
+cmd_info() {
+    print_info "Device Information:"
+    echo ""
+    
+    local files=(
+        "/etc/adu-manufacturer:Manufacturer"
+        "/etc/adu-model:Model"
+        "/etc/adu-version:Software Version"
+        "/etc/adu-swupdate-hw-compat:Hardware Compatibility"
+    )
+    
+    for file_spec in "${files[@]}"; do
+        local file="${file_spec%%:*}"
+        local label="${file_spec#*:}"
+        
+        if [ -f "$file" ]; then
+            printf "  %-25s %s\n" "$label:" "$(cat "$file")"
+        else
+            printf "  %-25s %s\n" "$label:" "(not found)"
+        fi
+    done
+    
+    echo ""
+    print_info "System Information:"
+    echo "  Hostname:                $(hostname)"
+    echo "  Kernel:                  $(uname -r)"
+    if [ -f /etc/os-release ]; then
+        echo "  OS:                      $(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)"
+    fi
+}
+
+cmd_bootenv() {
+    print_info "U-Boot Environment:"
+    echo ""
+    
+    if ! command -v fw_printenv &>/dev/null; then
+        print_error "fw_printenv not available"
+        exit 1
+    fi
+    
+    local vars=(
+        "bootcount"
+        "bootlimit"
+        "upgrade_available"
+        "current_partition"
+    )
+    
+    for var in "${vars[@]}"; do
+        local value=$(fw_printenv "$var" 2>/dev/null | cut -d'=' -f2)
+        if [ -n "$value" ]; then
+            printf "  %-20s %s\n" "$var:" "$value"
+        else
+            printf "  %-20s %s\n" "$var:" "(not set)"
+        fi
+    done
+    
+    echo ""
+    print_info "For full environment: fw_printenv"
+}
+
+# Main command dispatcher
+main() {
+    if [ $# -eq 0 ]; then
+        show_usage
+        exit 0
+    fi
+    
+    local command="$1"
+    shift
+    
+    case "$command" in
+        service)
+            cmd_service "$@"
+            ;;
+        journal)
+            cmd_journal "$@"
+            ;;
+        logs)
+            cmd_logs
+            ;;
+        tail)
+            cmd_tail "$@"
+            ;;
+        run)
+            cmd_run "$@"
+            ;;
+        health)
+            cmd_health
+            ;;
+        diag)
+            cmd_diag "$@"
+            ;;
+        version)
+            cmd_version
+            ;;
+        config)
+            cmd_config
+            ;;
+        clear-blacklist)
+            cmd_clear_blacklist
+            ;;
+        reset-state)
+            cmd_reset_state
+            ;;
+        info)
+            cmd_info
+            ;;
+        bootenv)
+            cmd_bootenv
+            ;;
+        help|-h|--help)
+            show_usage
+            ;;
+        --version)
+            echo "adu-ctl version $VERSION"
+            ;;
+        *)
+            print_error "Unknown command: $command"
+            echo "Run 'adu-ctl help' for usage"
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

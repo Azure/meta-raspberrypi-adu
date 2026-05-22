@@ -1,0 +1,427 @@
+#!/bin/bash
+# ADU Disk Utility - Interactive USB storage management tool
+# Scans for unmounted USB devices and provides mount/unmount functionality
+
+# Don't use set -e since we handle errors explicitly
+set +e
+
+COLOR_RESET="\e[0m"
+COLOR_GREEN="\e[32m"
+COLOR_YELLOW="\e[33m"
+COLOR_RED="\e[31m"
+COLOR_BLUE="\e[34m"
+COLOR_CYAN="\e[36m"
+
+print_header() {
+    echo -e "${COLOR_CYAN}======================================${COLOR_RESET}"
+    echo -e "${COLOR_CYAN}    ADU Disk Utility (USB Manager)${COLOR_RESET}"
+    echo -e "${COLOR_CYAN}======================================${COLOR_RESET}"
+    echo ""
+}
+
+print_info() {
+    echo -e "${COLOR_BLUE}[i]${COLOR_RESET} $1"
+}
+
+print_success() {
+    echo -e "${COLOR_GREEN}[+]${COLOR_RESET} $1"
+}
+
+print_warning() {
+    echo -e "${COLOR_YELLOW}[!]${COLOR_RESET} $1"
+}
+
+print_error() {
+    echo -e "${COLOR_RED}[-]${COLOR_RESET} $1"
+}
+
+# Check if running as root
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        print_error "This tool must be run as root"
+        echo "  Run: sudo adu-diskutil"
+        exit 1
+    fi
+}
+
+# Get all USB storage devices
+get_usb_devices() {
+    # Find block devices connected via USB
+    for dev in /sys/block/sd*; do
+        if [ -e "$dev" ]; then
+            devname=$(basename "$dev")
+            # Check if it's a USB device
+            if readlink "$dev" | grep -q "usb"; then
+                echo "$devname"
+            fi
+        fi
+    done
+}
+
+# Get partitions for a device
+get_partitions() {
+    local device=$1
+    local parts=$(ls /dev/${device}[0-9]* 2>/dev/null)
+    if [ -n "$parts" ]; then
+        echo "$parts"
+    fi
+}
+
+# Check if partition is mounted
+is_mounted() {
+    local partition=$1
+    mount | grep -q "^${partition} " 2>/dev/null
+    return $?
+}
+
+# Get mount point for partition
+get_mount_point() {
+    local partition=$1
+    mount | grep "^${partition} " | awk '{print $3}' | head -1
+}
+
+# Get filesystem label
+get_label() {
+    local partition=$1
+    local label=$(blkid -s LABEL -o value "$partition" 2>/dev/null)
+    if [ -z "$label" ]; then
+        echo "unlabeled"
+    else
+        # Sanitize label: replace spaces and special chars with underscores
+        echo "$label" | tr ' /' '_' | tr -cd '[:alnum:]_-'
+    fi
+}
+
+# Get filesystem type
+get_fstype() {
+    local partition=$1
+    blkid -s TYPE -o value "$partition" 2>/dev/null || echo "unknown"
+}
+
+# Get partition size
+get_size() {
+    local partition=$1
+    local devname=$(basename "$partition")
+    
+    if [ ! -f "/sys/class/block/${devname}/size" ]; then
+        echo "unknown"
+        return
+    fi
+    
+    local size_kb=$(cat /sys/class/block/${devname}/size 2>/dev/null)
+    
+    if [ -z "$size_kb" ] || [ "$size_kb" = "0" ]; then
+        echo "0MB"
+        return
+    fi
+    
+    local size_mb=$((size_kb / 2048))
+    if [ $size_mb -gt 1024 ]; then
+        echo "$(($size_mb / 1024))GB"
+    else
+        echo "${size_mb}MB"
+    fi
+}
+
+# Mount partition
+mount_partition() {
+    local partition=$1
+    local label=$(get_label "$partition")
+    local fstype=$(get_fstype "$partition")
+    
+    print_info "Mounting ${partition}..."
+    
+    # Check if already mounted
+    if is_mounted "$partition"; then
+        local existing_mount=$(get_mount_point "$partition")
+        print_warning "Already mounted at: $existing_mount"
+        return 1
+    fi
+    
+    # Create mount point with sanitized label
+    local mount_point="/mnt/usb-${label}"
+    
+    # If mount point exists and is in use, try alternative
+    if [ -d "$mount_point" ] && mountpoint -q "$mount_point" 2>/dev/null; then
+        print_warning "Mount point in use, using alternative"
+        local partname=$(basename "$partition")
+        mount_point="/mnt/${partname}"
+    fi
+    
+    mkdir -p "$mount_point" 2>/dev/null
+    
+    if [ ! -d "$mount_point" ]; then
+        print_error "Failed to create mount point: $mount_point"
+        return 1
+    fi
+    
+    # Mount with appropriate options based on filesystem
+    local mount_result=1
+    case "$fstype" in
+        vfat|fat|fat32)
+            mount -t vfat -o rw,umask=0000 "$partition" "$mount_point" 2>/dev/null
+            mount_result=$?
+            ;;
+        ntfs)
+            mount -t ntfs-3g -o rw,umask=0000 "$partition" "$mount_point" 2>/dev/null
+            mount_result=$?
+            ;;
+        ext4|ext3|ext2)
+            mount -t "$fstype" "$partition" "$mount_point" 2>/dev/null
+            mount_result=$?
+            ;;
+        *)
+            mount "$partition" "$mount_point" 2>/dev/null
+            mount_result=$?
+            ;;
+    esac
+    
+    if [ $mount_result -eq 0 ]; then
+        print_success "Mounted at: $mount_point"
+        return 0
+    else
+        print_error "Failed to mount $partition (type: $fstype)"
+        rmdir "$mount_point" 2>/dev/null
+        return 1
+    fi
+}
+
+# Unmount partition
+unmount_partition() {
+    local partition=$1
+    
+    if ! is_mounted "$partition"; then
+        print_warning "$partition is not mounted"
+        return 1
+    fi
+    
+    local mount_point=$(get_mount_point "$partition")
+    
+    print_info "Unmounting ${partition}..."
+    
+    # Sync to ensure all data is written
+    sync
+    sleep 1
+    
+    if umount "$partition" 2>/dev/null; then
+        print_success "Unmounted: $partition"
+        # Clean up mount point if empty and in /mnt/
+        if [[ "$mount_point" == /mnt/* ]] && [ -d "$mount_point" ]; then
+            if rmdir "$mount_point" 2>/dev/null; then
+                print_info "Removed mount point: $mount_point"
+            fi
+        fi
+        return 0
+    else
+        print_error "Failed to unmount $partition"
+        print_warning "Device may be busy. Close any files/programs using it."
+        echo "  Try: lsof | grep $mount_point"
+        return 1
+    fi
+}
+
+# List all USB devices and partitions
+list_devices() {
+    local usb_devices=$(get_usb_devices)
+    
+    if [ -z "$usb_devices" ]; then
+        print_warning "No USB storage devices detected"
+        return 1
+    fi
+    
+    print_info "USB Storage Devices:"
+    echo ""
+    
+    for dev in $usb_devices; do
+        echo -e "${COLOR_GREEN}Device: /dev/${dev}${COLOR_RESET}"
+        
+        local partitions=$(get_partitions "$dev")
+        if [ -z "$partitions" ]; then
+            echo "  No partitions found"
+            continue
+        fi
+        
+        for part in $partitions; do
+            local label=$(get_label "$part")
+            local fstype=$(get_fstype "$part")
+            local size=$(get_size "$part")
+            
+            if is_mounted "$part"; then
+                local mount_point=$(get_mount_point "$part")
+                echo -e "  ${COLOR_CYAN}[M] $part${COLOR_RESET} - ${label} (${fstype}, ${size}) - ${COLOR_GREEN}Mounted${COLOR_RESET} at $mount_point"
+            else
+                echo -e "  ${COLOR_YELLOW}[ ] $part${COLOR_RESET} - ${label} (${fstype}, ${size}) - ${COLOR_YELLOW}Not mounted${COLOR_RESET}"
+            fi
+        done
+        echo ""
+    done
+}
+
+# Interactive mount mode
+interactive_mount() {
+    print_header
+    print_info "Scanning for unmounted USB storage devices..."
+    echo ""
+    
+    local usb_devices=$(get_usb_devices)
+    
+    if [ -z "$usb_devices" ]; then
+        print_warning "No USB storage devices detected"
+        echo ""
+        echo "Please ensure:"
+        echo "  1. USB device is properly connected"
+        echo "  2. Device has power (for USB hubs)"
+        echo "  3. Device is recognized by kernel (check dmesg)"
+        exit 0
+    fi
+    
+    local found_unmounted=0
+    
+    for dev in $usb_devices; do
+        local partitions=$(get_partitions "$dev")
+        
+        if [ -z "$partitions" ]; then
+            continue
+        fi
+        
+        for part in $partitions; do
+            if ! is_mounted "$part"; then
+                found_unmounted=1
+                local label=$(get_label "$part")
+                local fstype=$(get_fstype "$part")
+                local size=$(get_size "$part")
+                
+                echo -e "${COLOR_YELLOW}Found unmounted partition:${COLOR_RESET}"
+                echo "  Device: $part"
+                echo "  Label:  ${label}"
+                echo "  Type:   ${fstype}"
+                echo "  Size:   ${size}"
+                echo ""
+                
+                read -p "Mount this partition? (y/n): " -n 1 -r
+                echo ""
+                
+                if [[ $REPLY =~ ^[Yy]$ ]]; then
+                    mount_partition "$part"
+                else
+                    print_info "Skipped"
+                fi
+                echo ""
+            fi
+        done
+    done
+    
+    if [ $found_unmounted -eq 0 ]; then
+        print_success "All USB partitions are already mounted"
+        echo ""
+        list_devices
+    fi
+}
+
+# Interactive unmount mode
+interactive_unmount() {
+    print_header
+    print_info "Mounted USB storage devices:"
+    echo ""
+    
+    local usb_devices=$(get_usb_devices)
+    local found_mounted=0
+    local mounted_parts=()
+    
+    if [ -z "$usb_devices" ]; then
+        print_warning "No USB storage devices detected"
+        exit 0
+    fi
+    
+    # Collect mounted partitions
+    for dev in $usb_devices; do
+        local partitions=$(get_partitions "$dev")
+        
+        for part in $partitions; do
+            if is_mounted "$part"; then
+                found_mounted=1
+                mounted_parts+=("$part")
+                local label=$(get_label "$part")
+                local mount_point=$(get_mount_point "$part")
+                local size=$(get_size "$part")
+                
+                echo "  [$((${#mounted_parts[@]}))] $part - ${label} (${size})"
+                echo "      Mounted at: $mount_point"
+            fi
+        done
+    done
+    
+    if [ $found_mounted -eq 0 ]; then
+        print_warning "No mounted USB partitions found"
+        exit 0
+    fi
+    
+    echo ""
+    echo "  [0] Unmount all"
+    echo "  [q] Quit"
+    echo ""
+    
+    read -p "Select partition to unmount: " -r selection
+    
+    if [[ "$selection" == "q" ]]; then
+        exit 0
+    elif [[ "$selection" == "0" ]]; then
+        for part in "${mounted_parts[@]}"; do
+            unmount_partition "$part"
+        done
+    elif [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#mounted_parts[@]}" ]; then
+        local idx=$((selection - 1))
+        unmount_partition "${mounted_parts[$idx]}"
+    else
+        print_error "Invalid selection"
+        exit 1
+    fi
+}
+
+# Print usage
+print_usage() {
+    cat << EOF
+Usage: adu-diskutil [command]
+
+Commands:
+  mount       Scan for unmounted USB storage and interactively mount
+  unmount     List mounted USB storage and interactively unmount
+  list        List all USB storage devices and their mount status
+  help        Show this help message
+
+Examples:
+  sudo adu-diskutil mount      # Mount unmounted USB devices
+  sudo adu-diskutil unmount    # Unmount mounted USB devices
+  sudo adu-diskutil list       # Show all USB devices
+
+EOF
+}
+
+# Main
+main() {
+    check_root
+    
+    case "${1:-mount}" in
+        mount)
+            interactive_mount
+            ;;
+        unmount|umount)
+            interactive_unmount
+            ;;
+        list|ls)
+            print_header
+            list_devices
+            ;;
+        help|-h|--help)
+            print_usage
+            ;;
+        *)
+            print_error "Unknown command: $1"
+            echo ""
+            print_usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

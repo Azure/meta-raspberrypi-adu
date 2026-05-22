@@ -1,0 +1,699 @@
+#!/bin/bash
+# =============================================================================
+# ADU System Diagnostic & Support Bundle Tool
+# =============================================================================
+# Purpose: Collects comprehensive diagnostic information for troubleshooting
+#          ADU issues. Creates a support bundle with all logs, configurations,
+#          and system state for root cause analysis.
+#
+# Output: Creates /boot/adu-diag-<datetime>/ directory containing:
+#         - System and device information
+#         - ADU agent version and configuration
+#         - All service journal logs
+#         - Application log files
+#         - Partition and mount information
+#         - U-Boot environment
+#         - Diagnostic results summary
+#
+# Usage: adu-diag [options]
+#        -v, --verbose   : Show detailed output (default: quiet mode)
+#        -o, --output    : Specify output directory (default: /boot/adu-diag-<datetime>)
+#        -h, --help      : Show this help message
+#
+# =============================================================================
+
+set +e  # Don't exit on errors - we want to collect as much info as possible
+
+VERSION="2.0.0"
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+OUTPUT_DIR="/boot/adu-diag-${TIMESTAMP}"
+SUMMARY_FILE="$OUTPUT_DIR/00-diagnostic-summary.txt"
+VERBOSE=0
+
+
+# Colors for terminal output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Result counters
+PASS_COUNT=0
+WARN_COUNT=0
+FAIL_COUNT=0
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+print_result() {
+    local status=$1
+    local message=$2
+    
+    case "$status" in
+        PASS)
+            [ $VERBOSE -eq 1 ] && echo -e "${GREEN}[PASS]${NC} $message"
+            echo "[PASS] $message" >> "$SUMMARY_FILE"
+            ((PASS_COUNT++))
+            ;;
+        WARN)
+            echo -e "${YELLOW}[WARN]${NC} $message"
+            echo "[WARN] $message" >> "$SUMMARY_FILE"
+            ((WARN_COUNT++))
+            ;;
+        FAIL)
+            echo -e "${RED}[FAIL]${NC} $message"
+            echo "[FAIL] $message" >> "$SUMMARY_FILE"
+            ((FAIL_COUNT++))
+            ;;
+        INFO)
+            [ $VERBOSE -eq 1 ] && echo -e "${BLUE}[INFO]${NC} $message"
+            ;;
+    esac
+}
+
+collect_file() {
+    local src=$1
+    local dest_name=$2
+    local category=$3
+    
+    local dest_dir="$OUTPUT_DIR/$category"
+    mkdir -p "$dest_dir" 2>/dev/null
+    
+    if [ -f "$src" ]; then
+        if cp -p "$src" "$dest_dir/$dest_name" 2>/dev/null; then
+            print_result INFO "Collected: $src"
+            return 0
+        fi
+    elif [ -d "$src" ]; then
+        if cp -rp "$src" "$dest_dir/$dest_name" 2>/dev/null; then
+            print_result INFO "Collected: $src"
+            return 0
+        fi
+    fi
+    print_result INFO "Skipped (not found): $src"
+    return 1
+}
+
+collect_command_output() {
+    local cmd=$1
+    local output_file=$2
+    local category=$3
+    
+    local dest_dir="$OUTPUT_DIR/$category"
+    mkdir -p "$dest_dir" 2>/dev/null
+    
+    if eval "$cmd" > "$dest_dir/$output_file" 2>&1; then
+        print_result INFO "Collected: $cmd"
+        return 0
+    else
+        echo "Command failed: $cmd" > "$dest_dir/$output_file"
+        print_result INFO "Failed (logged): $cmd"
+        return 1
+    fi
+}
+
+collect_journal() {
+    local service=$1
+    local lines=${2:-1000}
+    
+    local dest_dir="$OUTPUT_DIR/journals"
+    mkdir -p "$dest_dir"
+    
+    local output_file="journalctl-${service}-${TIMESTAMP}.log"
+    
+    if systemctl list-unit-files "$service" &>/dev/null; then
+        journalctl -u "$service" -n "$lines" --no-pager > "$dest_dir/$output_file" 2>&1
+        print_result INFO "Collected journal: $service"
+        return 0
+    fi
+    return 1
+}
+
+# Check if running as root (needed for some operations)
+if [ "$EUID" -ne 0 ] && [ "$(id -u)" -ne 0 ]; then
+    echo "WARNING: Not running as root. Some diagnostic information may be incomplete."
+    echo "         Consider running with sudo for complete diagnostics."
+    echo ""
+fi
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -v|--verbose)
+            VERBOSE=1
+            shift
+            ;;
+        -o|--output)
+            if [ -z "$2" ]; then
+                echo "Error: -o/--output requires an argument"
+                exit 1
+            fi
+            OUTPUT_DIR="$2"
+            SUMMARY_FILE="$OUTPUT_DIR/00-diagnostic-summary.txt"
+            shift 2
+            ;;
+        -h|--help)
+            grep "^#" "$0" | grep -E "^# (Purpose|Output|Usage)" | sed 's/^# //'
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# =============================================================================
+# Initialize Support Bundle
+# =============================================================================
+
+echo "=========================================="
+echo "ADU Support Bundle Tool v${VERSION}"
+echo "$(date)"
+echo "=========================================="
+echo ""
+
+# Check available disk space in output location
+OUTPUT_PARENT=$(dirname "$OUTPUT_DIR")
+if [ -d "$OUTPUT_PARENT" ]; then
+    AVAILABLE_MB=$(df -m "$OUTPUT_PARENT" | awk 'NR==2 {print $4}')
+    if [ "$AVAILABLE_MB" -lt 100 ]; then
+        echo "WARNING: Low disk space in $OUTPUT_PARENT (${AVAILABLE_MB}MB available)"
+        echo "         Bundle creation may fail if space runs out."
+        echo ""
+    fi
+fi
+
+# Create output directory structure
+if ! mkdir -p "$OUTPUT_DIR"/{system,config,logs,journals,partitions,network} 2>/dev/null; then
+    echo "ERROR: Failed to create output directory: $OUTPUT_DIR"
+    echo "       Check permissions and disk space."
+    exit 1
+fi
+
+# Initialize summary file
+{
+    echo "=========================================="
+    echo "ADU Diagnostic Summary"
+    echo "Generated: $(date)"
+    echo "Hostname: $(hostname)"
+    echo "========================================="
+    echo ""
+} > "$SUMMARY_FILE"
+
+if [ ! -f "$SUMMARY_FILE" ]; then
+    echo "ERROR: Failed to create summary file: $SUMMARY_FILE"
+    exit 1
+fi
+
+print_result INFO "Creating support bundle in: $OUTPUT_DIR"
+echo ""
+
+# =============================================================================
+# 1. System Information
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting system information..."
+
+# OS and distro info
+collect_file "/etc/os-release" "os-release.txt" "system"
+collect_command_output "uname -a" "uname.txt" "system"
+if command -v hostnamectl &>/dev/null; then
+    collect_command_output "hostnamectl" "hostnamectl.txt" "system"
+fi
+collect_command_output "uptime" "uptime.txt" "system"
+collect_command_output "date" "date.txt" "system"
+
+# CPU and memory
+if command -v lscpu &>/dev/null; then
+    collect_command_output "lscpu" "cpu-info.txt" "system"
+fi
+collect_command_output "free -h" "memory.txt" "system"
+collect_command_output "cat /proc/meminfo" "meminfo.txt" "system"
+
+# Check basic system health
+if [ -f "/etc/os-release" ]; then
+    print_result PASS "System information collected"
+else
+    print_result FAIL "Unable to collect system information"
+fi
+
+# =============================================================================
+# 2. Device Information
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting device information..."
+
+# ADU device info files
+collect_file "/etc/adu-version" "adu-version.txt" "config"
+collect_file "/etc/adu-manufacturer" "adu-manufacturer.txt" "config"
+collect_file "/etc/adu-model" "adu-model.txt" "config"
+collect_file "/etc/adu-swupdate-hw-compat" "adu-swupdate-hw-compat.txt" "config"
+
+if [ -f "/etc/adu-version" ] && [ -f "/etc/adu-manufacturer" ] && [ -f "/etc/adu-model" ]; then
+    print_result PASS "Device information files present"
+else
+    print_result WARN "Some device information files missing"
+fi
+
+# =============================================================================
+# 3. ADU Agent Version and Information
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting ADU agent information..."
+
+# Agent binary version
+if command -v AducIotAgent &>/dev/null; then
+    if ! collect_command_output "AducIotAgent --version" "agent-version.txt" "system"; then
+        collect_command_output "strings /usr/bin/AducIotAgent | grep -i version | head -10" "agent-version.txt" "system"
+    fi
+    print_result PASS "ADU agent binary found"
+else
+    print_result FAIL "ADU agent binary not found"
+fi
+
+# Agent packages
+collect_command_output "dpkg -l | grep -i 'adu\|azure-device-update\|delivery'" "installed-packages.txt" "system"
+
+# =============================================================================
+# 4. Partition and Disk Information
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting partition information..."
+
+# Disk layout
+collect_command_output "lsblk -f" "lsblk-filesystems.txt" "partitions"
+collect_command_output "lsblk -o NAME,SIZE,TYPE,MOUNTPOINT,FSTYPE,UUID" "lsblk-detailed.txt" "partitions"
+if command -v fdisk &>/dev/null && [ "$EUID" -eq 0 ]; then
+    collect_command_output "fdisk -l" "fdisk.txt" "partitions"
+fi
+if command -v parted &>/dev/null && [ "$EUID" -eq 0 ]; then
+    collect_command_output "parted -l" "parted.txt" "partitions"
+fi
+
+# Mount points
+collect_command_output "mount" "mount.txt" "partitions"
+collect_command_output "df -h" "df-human.txt" "partitions"
+collect_command_output "df -i" "df-inodes.txt" "partitions"
+
+# Filesystem health
+collect_file "/etc/fstab" "fstab.txt" "partitions"
+
+# Check /adu partition
+if mount | grep -q '/adu'; then
+    print_result PASS "/adu partition is mounted"
+else
+    print_result FAIL "/adu partition is NOT mounted"
+fi
+
+# =============================================================================
+# 5. Directory Structure and Permissions
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting directory information..."
+
+# ADU directory structure
+{
+    echo "=== /adu directory structure ==="
+    ls -laR /adu/ 2>&1
+    echo ""
+    echo "=== /etc/adu ==="
+    ls -la /etc/adu 2>&1
+    echo ""
+    echo "=== /var/lib/adu ==="
+    ls -laR /var/lib/adu 2>&1
+    echo ""
+    echo "=== /var/log/adu ==="
+    ls -la /var/log/adu 2>&1
+} > "$OUTPUT_DIR/partitions/directory-structure.txt"
+
+# Check critical paths and permissions
+critical_paths=(
+    "/adu"
+    "/adu/conf"
+    "/adu/logs"
+    "/adu/data"
+    "/etc/adu"
+    "/var/lib/adu"
+    "/var/log/adu"
+)
+
+{
+    echo "=== Critical Path Permissions ==="
+    for path in "${critical_paths[@]}"; do
+        if [ -e "$path" ]; then
+            ls -ld "$path" 2>&1
+        else
+            echo "$path: NOT FOUND"
+        fi
+    done
+} > "$OUTPUT_DIR/partitions/permissions.txt"
+
+# Check /adu/conf permissions (should be adu:adu 0750)
+if [ -d "/adu/conf" ]; then
+    owner=$(stat -c '%U:%G' /adu/conf 2>/dev/null)
+    perms=$(stat -c '%a' /adu/conf 2>/dev/null)
+    if [ "$owner" = "adu:adu" ] && [ "$perms" = "750" ]; then
+        print_result PASS "/adu/conf permissions correct (adu:adu 0750)"
+    else
+        print_result WARN "/adu/conf permissions: $owner $perms (expected adu:adu 0750)"
+    fi
+else
+    print_result FAIL "/adu/conf directory not found"
+fi
+
+# =============================================================================
+# 6. U-Boot Environment
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting U-Boot environment..."
+
+if command -v fw_printenv &>/dev/null; then
+    collect_command_output "fw_printenv" "uboot-env.txt" "partitions"
+    
+    # Check boot counter and upgrade_available
+    {
+        echo "=== Key U-Boot Variables ==="
+        fw_printenv bootcount 2>/dev/null || echo "bootcount: not set"
+        fw_printenv upgrade_available 2>/dev/null || echo "upgrade_available: not set"
+        fw_printenv bootlimit 2>/dev/null || echo "bootlimit: not set"
+        fw_printenv current_partition 2>/dev/null || echo "current_partition: not set"
+    } > "$OUTPUT_DIR/partitions/uboot-key-vars.txt"
+    
+    print_result PASS "U-Boot environment collected"
+else
+    print_result WARN "fw_printenv not available"
+fi
+
+# =============================================================================
+# 7. ADU Configuration Files
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting configuration files..."
+
+# Main ADU config
+config_paths=(
+    "/adu/conf/du-config.json"
+    "/etc/adu/du-config.json"
+)
+
+config_found=0
+for config in "${config_paths[@]}"; do
+    if [ -f "$config" ]; then
+        # Mask sensitive data
+        sed -e 's/"connectionData".*/"connectionData": "***MASKED***",/' \
+            -e 's/"connectionString".*/"connectionString": "***MASKED***",/' \
+            "$config" > "$OUTPUT_DIR/config/du-config.json" 2>/dev/null
+        config_found=1
+        
+        # Validate JSON
+        if command -v python3 &>/dev/null; then
+            if python3 -c "import json; json.load(open('$config'))" 2>/dev/null; then
+                print_result PASS "du-config.json found and valid"
+            else
+                print_result FAIL "du-config.json found but INVALID JSON"
+            fi
+        else
+            print_result PASS "du-config.json found (JSON validation skipped)"
+        fi
+        break
+    fi
+done
+
+[ $config_found -eq 0 ] && print_result FAIL "du-config.json not found"
+
+# ADU diagnostics config
+collect_file "/adu/conf/du-diagnostics-config.json" "du-diagnostics-config.json" "config"
+
+# SWUpdate config
+collect_file "/etc/swupdate.cfg" "swupdate.cfg" "config"
+collect_file "/usr/lib/adu/yocto-a-b-update.sh" "yocto-a-b-update.sh" "config"
+
+# Delivery Optimization config
+collect_file "/etc/deliveryoptimization-agent/admin-config.json" "do-admin-config.json" "config"
+collect_file "/etc/deliveryoptimization-agent/sdk-config.json" "do-sdk-config.json" "config"
+
+# =============================================================================
+# 8. ADU State Files
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting ADU state files..."
+
+# Workflow states
+if [ -d "/var/lib/adu/states" ] || [ -d "/adu/data/states" ]; then
+    collect_command_output "find /var/lib/adu/states /adu/data/states -type f -exec ls -la {} \; 2>/dev/null" "state-files.txt" "config"
+    
+    # Failed workflows blacklist
+    if [ -f "/var/lib/adu/states/failed_workflows.txt" ]; then
+        collect_file "/var/lib/adu/states/failed_workflows.txt" "failed_workflows.txt" "config"
+        print_result WARN "Failed workflows blacklist exists (check for recurring failures)"
+    else
+        print_result PASS "No failed workflows blacklist (system healthy)"
+    fi
+fi
+
+# Download cache
+if [ -d "/var/lib/adu/downloads" ]; then
+    collect_command_output "ls -la /var/lib/adu/downloads/" "downloads.txt" "config"
+elif [ -d "/adu/data/downloads" ]; then
+    collect_command_output "ls -la /adu/data/downloads/" "downloads.txt" "config"
+fi
+
+# =============================================================================
+# 9. Service Status
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting service status..."
+
+adu_services=(
+    "adu.mount"
+    "adu-filesystem-layout.service"
+    "adu-oobe.service"
+    "adu-config-setup.service"
+    "adu-persistent-overlay.service"
+    "adu-boot-validation.service"
+    "adu-swap.service"
+    "deviceupdate-agent.service"
+    "deliveryoptimization-agent.service"
+)
+
+{
+    echo "=== Service Status Summary ==="
+    for service in "${adu_services[@]}"; do
+        if systemctl list-unit-files "$service" &>/dev/null; then
+            status=$(systemctl is-active "$service" 2>&1)
+            enabled=$(systemctl is-enabled "$service" 2>&1)
+            echo "$service: $status (enabled: $enabled)"
+        else
+            echo "$service: not installed"
+        fi
+    done
+} > "$OUTPUT_DIR/system/service-status.txt"
+
+# Check critical services
+if systemctl is-active --quiet deviceupdate-agent.service 2>/dev/null; then
+    print_result PASS "deviceupdate-agent.service is running"
+else
+    print_result FAIL "deviceupdate-agent.service is NOT running"
+fi
+
+if systemctl is-active --quiet adu.mount 2>/dev/null; then
+    print_result PASS "adu.mount is active"
+else
+    print_result FAIL "adu.mount is NOT active"
+fi
+
+# =============================================================================
+# 10. Journal Logs for All Services
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting journal logs..."
+
+for service in "${adu_services[@]}"; do
+    collect_journal "$service" 2000
+done
+
+# Also collect system journal
+collect_command_output "journalctl -b -n 1000 --no-pager" "journalctl-system-boot-${TIMESTAMP}.log" "journals"
+
+print_result PASS "Service journal logs collected"
+
+# =============================================================================
+# 11. Application Log Files
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting application logs..."
+
+# ADU logs
+log_collected=0
+if [ -d "/var/log/adu" ] && [ -n "$(ls -A /var/log/adu 2>/dev/null)" ]; then
+    log_collected=1
+    mkdir -p "$OUTPUT_DIR/logs/adu"
+    cp -rp /var/log/adu/* "$OUTPUT_DIR/logs/adu/" 2>/dev/null
+fi
+if [ -d "/adu/logs" ] && [ -n "$(ls -A /adu/logs 2>/dev/null)" ]; then
+    log_collected=1
+    mkdir -p "$OUTPUT_DIR/logs/adu"
+    cp -rp /adu/logs/* "$OUTPUT_DIR/logs/adu/" 2>/dev/null
+fi
+if [ $log_collected -eq 1 ]; then
+    print_result PASS "ADU application logs collected"
+else
+    print_result WARN "ADU log directory not found or empty"
+fi
+
+# Delivery Optimization logs
+if [ -d "/var/log/deliveryoptimization-agent" ] && [ -n "$(ls -A /var/log/deliveryoptimization-agent 2>/dev/null)" ]; then
+    mkdir -p "$OUTPUT_DIR/logs/deliveryoptimization"
+    if cp -rp /var/log/deliveryoptimization-agent/* "$OUTPUT_DIR/logs/deliveryoptimization/" 2>/dev/null; then
+        print_result PASS "Delivery Optimization logs collected"
+    fi
+else
+    print_result WARN "Delivery Optimization log directory not found or empty"
+fi
+
+# System logs
+collect_file "/var/log/syslog" "syslog.log" "logs"
+collect_file "/var/log/messages" "messages.log" "logs"
+
+# Kernel messages
+collect_command_output "dmesg" "dmesg.txt" "logs"
+
+# =============================================================================
+# 12. Network Information
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting network information..."
+
+collect_command_output "ip addr show" "ip-addr.txt" "network"
+collect_command_output "ip route show" "ip-route.txt" "network"
+collect_command_output "cat /etc/resolv.conf" "resolv.conf.txt" "network"
+if command -v ss &>/dev/null; then
+    collect_command_output "ss -tulpn" "listening-ports.txt" "network"
+elif command -v netstat &>/dev/null; then
+    collect_command_output "netstat -tulpn" "listening-ports.txt" "network"
+fi
+
+# Network connectivity tests
+{
+    echo "=== Network Connectivity Tests ==="
+    echo "DNS resolution:"
+    host github.com 2>&1 || nslookup github.com 2>&1
+    echo ""
+    echo "Connectivity to Azure:"
+    ping -c 3 azure.microsoft.com 2>&1
+} > "$OUTPUT_DIR/network/connectivity-tests.txt"
+
+if host github.com &>/dev/null; then
+    print_result PASS "DNS resolution working"
+else
+    print_result WARN "DNS resolution issues detected"
+fi
+
+# =============================================================================
+# 13. User and Group Information
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting user/group information..."
+
+{
+    echo "=== ADU User ==="
+    id adu 2>&1 || echo "adu user not found"
+    echo ""
+    echo "=== DO User ==="
+    id do 2>&1 || echo "do user not found"
+    echo ""
+    echo "=== All Users ==="
+    cat /etc/passwd
+    echo ""
+    echo "=== All Groups ==="
+    cat /etc/group
+} > "$OUTPUT_DIR/system/users-groups.txt"
+
+if id adu &>/dev/null; then
+    print_result PASS "adu user exists"
+else
+    print_result FAIL "adu user does NOT exist"
+fi
+
+# =============================================================================
+# 14. Overlayfs Configuration
+# =============================================================================
+
+[ $VERBOSE -eq 1 ] && echo "Collecting overlayfs information..."
+
+collect_file "/etc/overlay/overlay.conf" "overlay.conf" "config"
+collect_command_output "mount | grep overlay" "overlay-mounts.txt" "partitions"
+collect_command_output "ls -la /usr/lib/adu/*.sh" "adu-scripts.txt" "config"
+
+if mount | grep -q overlay; then
+    print_result PASS "Overlay filesystem active"
+else
+    print_result WARN "No overlay filesystem detected"
+fi
+
+# =============================================================================
+# 15. Create Bundle Archive
+# =============================================================================
+
+echo ""
+[ $VERBOSE -eq 1 ] && echo "Creating compressed archive..."
+
+BUNDLE_PATH="$(dirname "$OUTPUT_DIR")/$(basename "$OUTPUT_DIR").tar.gz"
+if tar -czf "$BUNDLE_PATH" -C "$(dirname "$OUTPUT_DIR")" "$(basename "$OUTPUT_DIR")" 2>/dev/null; then
+    if [ -f "$BUNDLE_PATH" ]; then
+        BUNDLE_SIZE=$(du -h "$BUNDLE_PATH" 2>/dev/null | cut -f1)
+        print_result INFO "Bundle archive created: $BUNDLE_PATH ($BUNDLE_SIZE)"
+    fi
+else
+    print_result WARN "Failed to create compressed archive (directory still available)"
+    BUNDLE_PATH="$OUTPUT_DIR"
+fi
+
+# =============================================================================
+# Final Summary
+# =============================================================================
+
+{
+    echo ""
+    echo "=========================================="
+    echo "Diagnostic Results Summary"
+    echo "=========================================="
+    echo "PASS: $PASS_COUNT checks"
+    echo "WARN: $WARN_COUNT checks"
+    echo "FAIL: $FAIL_COUNT checks"
+    echo ""
+    echo "Output directory: $OUTPUT_DIR"
+    if [ -f "$BUNDLE_PATH" ] && [ "$BUNDLE_PATH" != "$OUTPUT_DIR" ]; then
+        echo "Bundle archive: $BUNDLE_PATH"
+    fi
+    echo "=========================================="
+} | tee -a "$SUMMARY_FILE"
+
+echo ""
+echo "==========================================="
+echo "Support Bundle Created Successfully!"
+echo "==========================================="
+echo ""
+echo "Location: $OUTPUT_DIR"
+if [ -f "$BUNDLE_PATH" ] && [ "$BUNDLE_PATH" != "$OUTPUT_DIR" ]; then
+    echo "Archive:  $BUNDLE_PATH"
+fi
+echo ""
+echo "Summary:"
+echo "  [PASS]: $PASS_COUNT"
+echo "  [WARN]: $WARN_COUNT"
+echo "  [FAIL]: $FAIL_COUNT"
+echo ""
+echo "To view summary:"
+echo "  cat $SUMMARY_FILE"
+echo ""
+if [ -f "$BUNDLE_PATH" ] && [ "$BUNDLE_PATH" != "$OUTPUT_DIR" ]; then
+    echo "To share bundle:"
+    echo "  # Copy $BUNDLE_PATH to your workstation"
+else
+    echo "To create archive manually:"
+    echo "  cd $(dirname \"$OUTPUT_DIR\") && tar -czf $(basename \"$OUTPUT_DIR\").tar.gz $(basename \"$OUTPUT_DIR\")"
+fi

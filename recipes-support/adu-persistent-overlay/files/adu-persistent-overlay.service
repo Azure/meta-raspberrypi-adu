@@ -1,0 +1,19 @@
+[Unit]
+Description=ADU Persistent Overlay and Bind Mounts (Overlayfs Strategy)
+DefaultDependencies=no
+After=local-fs.target adu.mount adu-filesystem-layout.service
+Requires=adu-filesystem-layout.service
+Before=systemd-user-sessions.service network-pre.target deviceupdate-agent.service
+ConditionPathIsMountPoint=/adu
+RequiresMountsFor=/adu
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/lib/adu/setup-overlay-dirs.sh
+ExecStart=/usr/lib/adu/mount-overlays.sh
+ExecStart=/usr/lib/adu/mount-critical-binds.sh
+ExecStop=/usr/lib/adu/umount-overlays.sh
+
+[Install]
+WantedBy=sysinit.target
